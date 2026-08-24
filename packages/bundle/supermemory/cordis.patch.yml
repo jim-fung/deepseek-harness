@@ -1,0 +1,15 @@
+# The dsh-supermemory bundle patch: opt-in hosted memory over supermemory.ai.
+# Apply it AFTER base (profiles list bundles in order). Rows address the base
+# composition by insertion; nothing here modifies existing rows, so default
+# profiles without this bundle are untouched.
+- insert:
+    - id: memory
+      name: '@deepseek-ai/dsh-memory'
+
+    - id: memory-provider
+      name: '@deepseek-ai/dsh-memory-supermemory'
+      config:
+        containerTagPrefix: dsh
+
+    - id: tool-memory
+      name: '@deepseek-ai/dsh-tool-memory'
