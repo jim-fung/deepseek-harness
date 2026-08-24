@@ -12,12 +12,11 @@ import type { AssembledSection } from '@deepseek-ai/dsh-system-prompt'
 /** Section name the recall contribution registers under. */
 export const MEMORY_PROFILE_SECTION_NAME = 'memory-profile'
 
-/** Prompt order of the recall section; negative orders render before the persona. */
-export const MEMORY_PROFILE_SECTION_ORDER = -10
-
 /**
  * Install the recall waterfall listener. Failures degrade to a warning log with
  * the section omitted — an unreachable memory service must not fail the session.
+ * The section is appended by the assemble waterfall after all ordered sections,
+ * so it renders last in the joined prompt.
  *
  * @param ctx - context carrying `memory` (operations) and `systemPrompt` (event target).
  */

@@ -59,7 +59,7 @@ export function applyMemoryTools(ctx: Context, options: { save: boolean; searchA
       isConcurrencySafe: () => false,
       async execute(args) {
         const scope = parseMemoryScope(args.scope, projectScopeId(process.cwd()))
-        if (typeof args.content !== 'string' || args.content.trim().length === 0) {
+        if (args.content.trim().length === 0) {
           throw new Error('content must be a non-empty string')
         }
         const hit = await ctx.memory.add({ scope, content: args.content })
@@ -129,7 +129,7 @@ export function applyMemoryTools(ctx: Context, options: { save: boolean; searchA
       },
       isConcurrencySafe: () => false,
       async execute(args) {
-        if (typeof args.id !== 'string' || args.id.length === 0) throw new Error('id must be a non-empty string')
+        if (args.id.length === 0) throw new Error('id must be a non-empty string')
         await ctx.memory.remove(args.id)
         return { removed: `Removed memory ${args.id}.` }
       },

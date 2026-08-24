@@ -10,7 +10,7 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import * as ToolMemory from '../src/index.ts'
 import { MEMORY_SEARCH_MAX_LIMIT, applyMemoryTools } from '../src/tools.ts'
-import { MEMORY_PROFILE_SECTION_NAME, MEMORY_PROFILE_SECTION_ORDER, applyRecall } from '../src/recall.ts'
+import { MEMORY_PROFILE_SECTION_NAME, applyRecall } from '../src/recall.ts'
 import { formatSaveOutput, formatSearchOutput, parseMemoryScope } from '../src/format.ts'
 import { projectScopeId } from '../src/scope.ts'
 
@@ -247,11 +247,16 @@ describe('config enablement', () => {
 describe('profile recall', () => {
   it('contributes the profile as a memory-profile assembly section', async () => {
     expect(MEMORY_PROFILE_SECTION_NAME).toBe('memory-profile')
-    expect(MEMORY_PROFILE_SECTION_ORDER).toBe(-10)
     const { ctx } = await mount()
     const assembly = await ctx.systemPrompt.assemble()
     const section = assembly.sections.find(candidate => candidate.name === MEMORY_PROFILE_SECTION_NAME)
     expect(section?.text).toContain('prefers pnpm; ships on Thursdays')
+  })
+
+  it('places the recall section after every ordered section', async () => {
+    const { ctx } = await mount()
+    const assembly = await ctx.systemPrompt.assemble()
+    expect(assembly.sections.at(-1)?.name).toBe(MEMORY_PROFILE_SECTION_NAME)
   })
 
   it('skips the section silently when the profile is empty', async () => {
@@ -264,9 +269,12 @@ describe('profile recall', () => {
     const { ctx } = await mount({
       provider: stubProvider({ profile: async () => { throw new Error('backend down') } }),
     })
+    const warnings: unknown[] = []
+    ctx.logger.warn = ((message: unknown) => void warnings.push(message)) as typeof ctx.logger.warn
     const assembly = await ctx.systemPrompt.assemble()
     expect(assembly.sections.map(section => section.name)).not.toContain(MEMORY_PROFILE_SECTION_NAME)
     expect(assembly.sections.length).toBeGreaterThan(0)
+    expect(warnings).toContain('memory: profile recall skipped')
   })
 
   it('registers no listener when recall is disabled', async () => {
