@@ -1,0 +1,8 @@
+{
+  "steps": [
+    {
+      "op": "prompt",
+      "text": "Remember that I prefer small PRs."
+    }
+  ]
+}
