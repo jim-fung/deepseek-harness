@@ -28,6 +28,20 @@ export class JsonRpcResponseError extends Error {
 }
 
 /**
+ * Map a thrown handler failure onto its JSON-RPC error code. A numeric
+ * `code` property rides through so typed rejections (e.g. `-32602` for
+ * invalid params) reach the peer; anything else is the generic `-32603`.
+ * @param error - the value the handler threw.
+ * @returns The wire error code for the failure.
+ */
+function wireErrorCode(error: unknown): number {
+  if (typeof error === 'object' && error !== null && typeof (error as { code?: unknown }).code === 'number') {
+    return (error as { code: number }).code
+  }
+  return -32603
+}
+
+/**
  * Outbound request and notification surface used by the runtime server and
  * SDK clients.
  */
@@ -233,7 +247,7 @@ export class JsonRpcLineTransport implements JsonRpcTransportPeer {
       const result = await handler(method, params)
       this.write({ jsonrpc: '2.0', id, result })
     } catch (error) {
-      this.writeError(id, -32603, error instanceof Error ? error.message : String(error))
+      this.writeError(id, wireErrorCode(error), error instanceof Error ? error.message : String(error))
     }
   }
 

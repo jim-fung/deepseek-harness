@@ -930,12 +930,12 @@ describe('HarnessSdkJsonRpcServer', () => {
       const ctx = await makeHarness(storageDir)
       try {
         const server = new HarnessSdkJsonRpcServer(ctx, new FakeTransport())
-        await expect(server.initialize({
+        await expect(server.handleRequest('initialize', {
           cwd: storageDir,
           provider: 'deepseek-official',
           model: 'model',
           maxTokens,
-        })).rejects.toThrow('initialize maxTokens must be a positive safe integer')
+        })).rejects.toThrow('invalid params: maxTokens must be a positive safe integer')
         await server.shutdown()
       } finally {
         await ctx.fiber.dispose()
@@ -1075,6 +1075,44 @@ describe('HarnessSdkJsonRpcServer', () => {
       await expect(server.handleRequest('does/not/exist', {}))
         .rejects
         .toThrow('unknown DeepSeek Harness SDK runtime method: does/not/exist')
+
+      await server.shutdown()
+    } finally {
+      await ctx.fiber.dispose()
+      await rm(storageDir, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects wire params with a typed -32602 before touching server state', async () => {
+    const storageDir = await mkdtemp(join(tmpdir(), 'dsh-jsonrpc-params-'))
+    const ctx = await makeHarness(storageDir)
+    try {
+      const server = new HarnessSdkJsonRpcServer(ctx, new FakeTransport())
+
+      const invalid: [string, unknown][] = [
+        ['initialize', undefined],
+        ['initialize', { provider: 'deepseek-official', model: 'm' }],
+        ['initialize', { cwd: '/tmp', provider: '', model: 'm' }],
+        ['initialize', { cwd: '/tmp', provider: 'p', model: 'm', maxTokens: 0 }],
+        ['session/prompt', { sessionId: 's' }],
+        ['session/prompt', { sessionId: 's', contentBlocks: 'hello' }],
+        ['session/prompt', { sessionId: 's', contentBlocks: [{ kind: 'text' }] }],
+      ]
+      for (const [method, params] of invalid) {
+        const error = await server.handleRequest(method, params as never).then(
+          (): Error | undefined => undefined,
+          (failure: unknown) => failure,
+        ) as Error & { code?: number } | undefined
+        expect([method, JSON.stringify(params), error?.name]).toEqual(
+          [method, JSON.stringify(params), 'InvalidParamsError'],
+        )
+        expect(error?.code, `${method} ${JSON.stringify(params)}`).toBe(-32602)
+      }
+
+      // A rejected initialize changed nothing: a valid one still mounts.
+      await expect(server.handleRequest('initialize', {
+        cwd: storageDir, provider: 'deepseek-official', model: 'deepseek-official',
+      })).resolves.toBeDefined()
 
       await server.shutdown()
     } finally {

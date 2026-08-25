@@ -67,6 +67,93 @@ function successStatus(reason: string, options: HarnessSdkJsonRpcServerOptions):
   return reason === 'max-tokens' && options.maxTokensAsSuccess === true ? 'ok' : 'error'
 }
 
+/** JSON-RPC wire code for request params that fail validation. */
+const INVALID_PARAMS_CODE = -32602
+
+/**
+ * Request params rejected at the wire boundary. The transport copies the
+ * carried `code` onto the JSON-RPC error frame instead of its default
+ * `-32603`, so SDK clients can distinguish bad params from handler failures.
+ */
+class InvalidParamsError extends Error {
+  readonly code = INVALID_PARAMS_CODE
+
+  constructor(detail: string) {
+    super(`invalid params: ${detail}`)
+    this.name = 'InvalidParamsError'
+  }
+}
+
+/** @returns The params object itself, rejecting absent and non-object values. */
+function assertObjectParams(params: Record<string, unknown> | undefined, method: string): Record<string, unknown> {
+  if (params === undefined || typeof params !== 'object' || Array.isArray(params)) {
+    throw new InvalidParamsError(`${method} requires an object params value`)
+  }
+  return params
+}
+
+/** @returns The named field's string value, rejecting absent, non-string, and empty values. */
+function assertStringField(params: Record<string, unknown>, field: string): string {
+  const value = params[field]
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new InvalidParamsError(`${field} must be a non-empty string`)
+  }
+  return value
+}
+
+/**
+ * Validate handshake params from the wire before any server state changes.
+ * @param params - the raw `initialize` params.
+ * @returns Typed params carrying only fields the wire contract declares.
+ */
+function validateInitializeParams(params: Record<string, unknown> | undefined): InitializeParams {
+  const record = assertObjectParams(params, 'initialize')
+  const validated: InitializeParams = {
+    cwd: assertStringField(record, 'cwd'),
+    provider: assertStringField(record, 'provider'),
+    model: assertStringField(record, 'model'),
+  }
+  const maxTokens = record.maxTokens
+  if (maxTokens !== undefined) {
+    if (typeof maxTokens !== 'number' || !Number.isSafeInteger(maxTokens) || maxTokens <= 0) {
+      throw new InvalidParamsError('maxTokens must be a positive safe integer')
+    }
+    validated.maxTokens = maxTokens
+  }
+  const reasoningEffort = record.reasoningEffort
+  if (reasoningEffort !== undefined) {
+    if (typeof reasoningEffort !== 'string' || reasoningEffort.length === 0) {
+      throw new InvalidParamsError('reasoningEffort must be a non-empty string')
+    }
+    validated.reasoningEffort = ReasoningEffortId(reasoningEffort)
+  }
+  return validated
+}
+
+/**
+ * Validate prompt params from the wire. Content blocks are checked at their
+ * envelope only (array of objects with a string `type`); per-type field
+ * validation stays with the message factory that consumes them.
+ * @param params - the raw `session/prompt` params.
+ * @returns Typed params.
+ */
+function validatePromptParams(params: Record<string, unknown> | undefined): SessionPromptParams {
+  const record = assertObjectParams(params, 'session/prompt')
+  const contentBlocks = record.contentBlocks
+  if (!Array.isArray(contentBlocks)) {
+    throw new InvalidParamsError('contentBlocks must be an array of content blocks')
+  }
+  for (const block of contentBlocks) {
+    if (typeof block !== 'object' || block === null || typeof (block as { type?: unknown }).type !== 'string') {
+      throw new InvalidParamsError('each content block must be an object with a string "type"')
+    }
+  }
+  return {
+    sessionId: assertStringField(record, 'sessionId'),
+    contentBlocks: contentBlocks as SessionPromptParams['contentBlocks'],
+  }
+}
+
 /**
  * SDK server over one booted harness context and transport peer. Construction
  * subscribes to session, agent, and subagent lifecycle events until shutdown;
@@ -128,19 +215,11 @@ export class HarnessSdkJsonRpcServer {
   }
 
   /**
-   * Validate and configure the SDK route, mounting the DeepSeek fallback only when unowned.
-   * @param params - SDK handshake parameters.
+   * Configure the SDK route, mounting the DeepSeek fallback only when unowned.
+   * @param params - validated SDK handshake parameters.
    * @returns server identity for the handshake.
    */
   async initialize(params: InitializeParams): Promise<InitializeResult> {
-    if (params.reasoningEffort !== undefined
-      && (typeof params.reasoningEffort !== 'string' || params.reasoningEffort.length === 0)) {
-      throw new TypeError('initialize reasoningEffort must be a non-empty string')
-    }
-    if (params.maxTokens !== undefined
-      && (!Number.isSafeInteger(params.maxTokens) || params.maxTokens <= 0)) {
-      throw new TypeError('initialize maxTokens must be a positive safe integer')
-    }
     const cwd = resolve(params.cwd)
     const provider = params.provider
     const model = params.model
@@ -170,7 +249,7 @@ export class HarnessSdkJsonRpcServer {
 
   /**
    * Queue one identified prompt without assigning later activity to it.
-   * @param params - target session and user content.
+   * @param params - validated target session and user content.
    * @returns the durable message identity.
    */
   async prompt(params: SessionPromptParams): Promise<SessionPromptResult> {
@@ -237,8 +316,10 @@ export class HarnessSdkJsonRpcServer {
   }
 
   /**
-   * Dispatch one incoming JSON-RPC request to its typed handler. Throws (→ a
-   * JSON-RPC error response) on an unknown method.
+   * Dispatch one incoming JSON-RPC request to its typed handler. Params are
+   * validated at this wire boundary first; a mismatch rejects with an
+   * {@link InvalidParamsError} (`-32602`) before any handler state changes.
+   * Throws (→ a JSON-RPC error response) on an unknown method.
    * @param method - the JSON-RPC method name.
    * @param params - the raw params object from the wire.
    * @returns the handler's result, to be serialized as the response.
@@ -246,9 +327,9 @@ export class HarnessSdkJsonRpcServer {
   async handleRequest(method: string, params: Record<string, unknown> | undefined): Promise<unknown> {
     switch (method) {
       case 'initialize':
-        return this.initialize(params as unknown as InitializeParams)
+        return this.initialize(validateInitializeParams(params))
       case 'session/prompt':
-        return this.prompt(params as unknown as SessionPromptParams)
+        return this.prompt(validatePromptParams(params))
       case 'shutdown':
         return this.shutdown()
       default:

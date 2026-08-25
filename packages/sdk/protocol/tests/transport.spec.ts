@@ -60,6 +60,27 @@ describe('JsonRpcLineTransport', () => {
     b.close()
   })
 
+  it('carries a numeric code from a thrown handler error onto the error frame', async () => {
+    const { a, b } = transportPair()
+    a.onRequest(async () => {
+      const failure = new Error('bad params')
+      ;(failure as Error & { code?: number }).code = -32602
+      throw failure
+    })
+    a.start()
+    b.start()
+
+    const failure = await b.request('prompt', {}).then(
+      () => { throw new Error('request unexpectedly succeeded') },
+      (error: unknown) => error,
+    )
+    expect(failure).toBeInstanceOf(JsonRpcResponseError)
+    expect(failure).toMatchObject({ message: 'bad params', code: -32602 })
+
+    a.close()
+    b.close()
+  })
+
   it('rejects immediately on a pre-aborted signal without registering pending state', async () => {
     const { b } = transportPair()
     b.start()
