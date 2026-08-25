@@ -523,6 +523,33 @@ describe('OutputCollector', () => {
     expect(third.spillPath).toBeDefined()
   })
 
+  it('readFrom completes a multibyte character split across reads once', () => {
+    const collector = new OutputCollector(64, undefined, 'split-seq', spillDir)
+    collector.push(Buffer.from([0x61, 0xc3]))
+    const first = collector.readFrom(0)
+    // 0xC3 0xA9 is 'é'; the trailing lead byte stays buffered, so the split
+    // sequence decodes once on the read that completes it, never as U+FFFD.
+    expect(first.text).toBe('a')
+
+    collector.push(Buffer.from([0xa9, 0x62]))
+    const second = collector.readFrom(first.nextOffset)
+    expect(second.text).toBe('éb')
+    expect(`${first.text}${second.text}`).not.toContain('\uFFFD')
+
+    expect(collector.readFrom(0).text).toBe('aéb')
+  })
+
+  it('readFrom backward re-read returns the whole retained text through a fresh decode', () => {
+    const collector = new OutputCollector(64, undefined, 'reread', spillDir)
+    collector.push(Buffer.from([0x61, 0xc3]))
+    collector.push(Buffer.from([0xa9, 0x62]))
+    collector.readFrom(0)
+    collector.readFrom(2)
+    const reread = collector.readFrom(0)
+    expect(reread.lossy).toBe(false)
+    expect(reread.text).toBe('aéb')
+  })
+
   it('contains close failures and drops the spill path', () => {
     const collector = new OutputCollector(4, 100, 'closefail', spillDir)
     collector.push(Buffer.from('aaaa'))

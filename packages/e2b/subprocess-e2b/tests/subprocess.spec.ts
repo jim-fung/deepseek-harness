@@ -373,6 +373,31 @@ describe('E2BOutputReader', () => {
     expect(reader.readFrom(0)).toEqual({ text: 'cdef', nextOffset: 6, lossy: true })
   })
 
+  it('completes a multibyte character split across reads once', () => {
+    const reader = new E2BOutputReader(64, 10, '/remote/spill')
+    reader.push(Buffer.from([0x61, 0xc3]))
+    // 0xC3 0xA9 is 'é'; the trailing lead byte stays buffered, so the split
+    // sequence decodes once on the read that completes it, never as U+FFFD.
+    const first = reader.readFrom(0)
+    expect(first.text).toBe('a')
+
+    reader.push(Buffer.from([0xa9, 0x62]))
+    const second = reader.readFrom(first.nextOffset)
+    expect(second.text).toBe('éb')
+    expect(`${first.text}${second.text}`).not.toContain('\uFFFD')
+
+    expect(reader.readFrom(0).text).toBe('aéb')
+  })
+
+  it('re-reads an already-consumed offset through a fresh whole-tail decode', () => {
+    const reader = new E2BOutputReader(64, 10, '/remote/spill')
+    reader.push(Buffer.from([0x61, 0xc3]))
+    reader.push(Buffer.from([0xa9, 0x62]))
+    reader.readFrom(0)
+    reader.readFrom(2)
+    expect(reader.readFrom(0)).toEqual({ text: 'aéb', nextOffset: 4, lossy: false })
+  })
+
   it('drops whole head chunks and withholds absent or over-cap spills', () => {
     const withoutSpill = new E2BOutputReader(2, undefined, '/unused')
     withoutSpill.push(Buffer.from('ab'))

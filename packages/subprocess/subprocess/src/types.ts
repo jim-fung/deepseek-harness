@@ -141,6 +141,12 @@ export interface SubprocessOutputReader {
    * Read everything captured since `fromByte`. When that offset has slid out
    * of the in-memory tail window the read is `lossy` — it returns the whole
    * retained tail and the gap is only recoverable from the spill file.
+   *
+   * Forward monotonic reads continue one shared streaming UTF-8 decoder, so a
+   * multibyte character split across incremental reads decodes once and is
+   * never rendered mid-sequence as U+FFFD; backward re-reads and lossy reads
+   * decode freshly, so a cut landing inside a multibyte sequence may render
+   * that character as U+FFFD.
    * @param fromByte - whole-stream offset to resume from (a prior read's `nextOffset`; 0 for the first read).
    * @returns the delta text, the next offset, the `lossy` flag, and the spill path when one exists.
    */

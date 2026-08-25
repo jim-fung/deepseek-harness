@@ -110,6 +110,10 @@ export class OutputCollector {
   private spillDisabled: boolean
   /** Total bytes ever pushed (not just retained). */
   private total = 0
+  /** Streaming UTF-8 state so a multibyte sequence split across reads decodes once. */
+  private readonly decoder = new TextDecoder()
+  /** Whole-stream byte offset through which `decoder` has consumed the stream. */
+  private decodedThrough = 0
 
   constructor(
     private readonly maxBytes: number,
@@ -201,6 +205,15 @@ export class OutputCollector {
    * pushed since `fromByte`. When `fromByte` has already slid out of the
    * in-memory tail window, the read is `lossy` — it returns the whole
    * retained tail and the gap is only recoverable from the spill file.
+   *
+   * Forward monotonic reads (`fromByte` equal to the previous read's
+   * `nextOffset` and still inside the retained window) continue one shared
+   * streaming UTF-8 decoder: an incomplete trailing multibyte sequence stays
+   * buffered until a later read completes it and is never rendered
+   * mid-sequence as U+FFFD. Backward re-reads (`fromByte` earlier than a
+   * prior read) and lossy reads decode freshly from the requested offset, so
+   * a cut landing inside a multibyte sequence may render that character as
+   * U+FFFD.
    * @param fromByte - whole-stream offset to resume from (a prior read's `nextOffset`; 0 for the first read).
    * @returns the delta text, the offset for the next read, the `lossy` flag, and the spill path when one was created.
    */
@@ -208,9 +221,20 @@ export class OutputCollector {
     const windowStart = this.total - this.bytes
     const buffer = Buffer.concat(this.chunks)
     const lossy = fromByte < windowStart
-    const slice = lossy ? buffer : buffer.subarray(fromByte - windowStart)
+    let text: string
+    if (!lossy && fromByte === this.decodedThrough) {
+      // Forward continuation: feed only the unconsumed bytes through the shared
+      // streaming decoder so a sequence split across pushes/reads decodes once,
+      // on the read that completes it.
+      text = this.decoder.decode(buffer.subarray(this.decodedThrough - windowStart), { stream: true })
+      this.decodedThrough = this.total
+    } else {
+      // Backward re-read or lossy read: fresh decode from the requested offset.
+      const slice = lossy ? buffer : buffer.subarray(fromByte - windowStart)
+      text = slice.toString('utf8')
+    }
     return {
-      text: slice.toString('utf8'),
+      text,
       nextOffset: this.total,
       lossy,
       ...this.spillFile !== undefined ? { spillPath: this.spillFile } : {},

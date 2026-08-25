@@ -67,6 +67,10 @@ export class E2BOutputReader implements SubprocessOutputReader {
   private retainedBytes = 0
   private totalBytes = 0
   private spillValid = true
+  /** Streaming UTF-8 state so a multibyte sequence split across reads decodes once. */
+  private readonly decoder = new TextDecoder()
+  /** Whole-stream byte offset through which `decoder` has consumed the stream. */
+  private decodedThrough = 0
 
   /**
    * Create a bounded reader over one remote spill path.
@@ -118,9 +122,20 @@ export class E2BOutputReader implements SubprocessOutputReader {
     const retained = Buffer.concat(this.chunks, this.retainedBytes)
     const firstRetained = this.totalBytes - this.retainedBytes
     const lossy = fromByte < firstRetained
-    const start = lossy ? 0 : Math.min(retained.length, Math.max(0, fromByte - firstRetained))
+    let text: string
+    if (!lossy && fromByte === this.decodedThrough) {
+      // Forward continuation: feed only the unconsumed bytes through the shared
+      // streaming decoder so a sequence split across pushes/reads decodes once,
+      // on the read that completes it.
+      text = this.decoder.decode(retained.subarray(this.decodedThrough - firstRetained), { stream: true })
+      this.decodedThrough = this.totalBytes
+    } else {
+      // Backward re-read or lossy read: fresh decode from the requested offset.
+      const start = lossy ? 0 : Math.min(retained.length, Math.max(0, fromByte - firstRetained))
+      text = retained.subarray(start).toString('utf8')
+    }
     return {
-      text: retained.subarray(start).toString('utf8'),
+      text,
       nextOffset: this.totalBytes,
       lossy,
       ...(lossy && this.spillValid && this.maxSpillBytes !== undefined && this.totalBytes <= this.maxSpillBytes
