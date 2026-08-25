@@ -38,13 +38,18 @@ export class SessionWriteBehind {
   }
 
   /**
-   * Copy one event into the persistence-owned queue and start a fixed deadline
+   * Retain one event in the persistence-owned queue and start a fixed deadline
    * when the automatic path is idle.
-   * @param event - frozen live event to retain independently of its producer.
+   *
+   * `Session.append` deeply freezes every event before publishing it on
+   * `session/event`; that freeze is the ownership boundary, so a frozen event
+   * is retained by reference. Any unfrozen producer value is cloned instead,
+   * keeping the queue free of mutable state shared with its producer.
+   * @param event - appended event to retain until its durable write settles.
    */
   enqueue(event: SessionEvent): void {
     const wasEmpty = this.pending.length === 0
-    this.pending.push(structuredClone(event))
+    this.pending.push(Object.isFrozen(event) ? event : structuredClone(event))
     if (this.barrier !== undefined) return
     if (this.automaticPaused) {
       this.automaticPaused = false

@@ -17,7 +17,7 @@ afterEach(() => {
 })
 
 describe('SessionWriteBehind', () => {
-  it('uses one fixed window from the first queued event and owns its copy', async () => {
+  it('uses one fixed window from the first queued event and clones unfrozen input', async () => {
     vi.useFakeTimers()
     const batches: SessionEvent[][] = []
     const controller = new SessionWriteBehind({
@@ -40,6 +40,24 @@ describe('SessionWriteBehind', () => {
       expect.objectContaining({ seq: 1 }),
     ]])
     expect(controller.hasWork).toBe(false)
+  })
+
+  it('retains a frozen event by reference and clones an unfrozen one', async () => {
+    const batches: SessionEvent[][] = []
+    const controller = new SessionWriteBehind({
+      maxDelayMs: 200,
+      write: async (events) => { batches.push(events) },
+      reportBackgroundFailure: vi.fn(),
+    })
+    const frozen = Object.freeze(event(0))
+    controller.enqueue(frozen)
+    const unfrozen = event(1)
+    controller.enqueue(unfrozen)
+    unfrozen.data.turn = 99
+
+    await controller.flush()
+    expect(Object.is(batches[0]![0], frozen)).toBe(true)
+    expect(batches[0]![1]).toMatchObject({ seq: 1, data: { turn: 2 } })
   })
 
   it('coalesces twenty events admitted ten milliseconds apart into one 200 ms batch', async () => {

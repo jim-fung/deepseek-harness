@@ -116,6 +116,19 @@ export interface StoredSuffix {
 }
 
 /**
+ * Advisory location hint for {@link PersistenceBackend.readStoredRevision}:
+ * the cwd scope the caller holds authoritative for the id — for a coordinator
+ * preparation, the stored header's own `cwd`, which identity validation has
+ * already bound to the artifact. Purely an optimization: a backend must
+ * resolve the id identically without the hint, and a hinted miss falls back to
+ * the backend's full discovery. No correctness may depend on the hint.
+ */
+export interface StoredRevisionHint {
+  /** The cwd the caller believes scopes the stored artifact (`undefined` = no cwd). */
+  readonly cwd: string | undefined
+}
+
+/**
  * The storage contract between {@link PersistenceCoordinator} and a concrete
  * backend: the minimal set of durable primitives the orchestration calls. A
  * backend implements these (over files, rows, an object store, …); the
@@ -147,10 +160,19 @@ export interface PersistenceBackend<TornMarker = unknown> {
   /**
    * Read the current source-qualified revision for one stored session without
    * loading its event log. Returns `undefined` when the identity is absent.
+   * The optional {@link StoredRevisionHint} is advisory: a backend may use it
+   * to probe the hinted location first, but a hinted miss (or no hint) must
+   * fall back to the same resolution it performs without one, so correctness
+   * never depends on the hint.
    * @param id - persisted session id to observe.
    * @param signal - optional cancellation for backend read work.
+   * @param hint - optional authoritative cwd for the id; advisory only.
    */
-  readStoredRevision(id: SessionId, signal?: AbortSignal): Promise<SessionPersistenceRevision | undefined>
+  readStoredRevision(
+    id: SessionId,
+    signal?: AbortSignal,
+    hint?: StoredRevisionHint,
+  ): Promise<SessionPersistenceRevision | undefined>
 
   /**
    * Optional seek-capable suffix read behind the service's `readFrom`: return
@@ -1044,12 +1066,20 @@ export class PersistenceCoordinator<TornMarker = unknown> {
     }
   }
 
-  /** Whether one cached source still names the current durable log revision. */
+  /**
+   * Whether one cached source still names the current durable log revision.
+   * The probe hints the stored header's own cwd: preparation's identity
+   * validation already bound that cwd to the artifact path, so a backend can
+   * stat the deterministic location instead of scanning every storage scope.
+   */
   private async isPreparedSourceCurrent(
     source: PreparedSessionSource<TornMarker>,
     signal?: AbortSignal,
   ): Promise<boolean> {
-    return await this.backend.readStoredRevision(source.inspection.meta.id, signal) === source.revision
+    const revision = await this.backend.readStoredRevision(source.inspection.meta.id, signal, {
+      cwd: source.inspection.meta.cwd,
+    })
+    return revision === source.revision
   }
 
   /** Return one durable immutable view of an already-live Session. */
@@ -1201,7 +1231,8 @@ export class PersistenceCoordinator<TornMarker = unknown> {
       void this.initFor(session)
     })
 
-    // Keep a persistence-owned copy of each frozen event and start its bounded window.
+    // Retain each appended event (arrives deep-frozen from Session.append) and
+    // start its bounded window.
     ctx.on('session/event', (session, event) => {
       const live = this.initFor(session)
       live.writes.enqueue(event)
