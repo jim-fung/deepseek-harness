@@ -164,8 +164,9 @@ declare module '@deepseek-ai/dsh-llm' {
  * Render one loaded skill for the model. The output is shared verbatim by the
  * `skill` tool result and the user-explicit invocation injection, so the model
  * sees one canonical `<skill_content>` shape on both paths. The name rides an
- * escaped attribute; the body is embedded verbatim (skills are trusted local
- * content, and user-supplied invocation text stays outside this wrapper).
+ * escaped attribute, the body is embedded with its framing-tag sequences
+ * entity-escaped so a skill body cannot forge or close the wrapper, and the
+ * provider and resource-prose escaping is unchanged.
  * @param skill - name, provider, optional resource base, and body to render.
  * @returns the complete model-facing `<skill_content>` block.
  */
@@ -178,7 +179,7 @@ export function renderSkillContent(skill: Pick<SkillDefinition, 'name' | 'provid
     '</skill_resources>',
     '',
     '<skill_instructions>',
-    skill.content,
+    escapeFramingTags(skill.content),
     '</skill_instructions>',
     '</skill_content>',
   ].join('\n')
@@ -217,6 +218,26 @@ function renderResourceHint(skill: Pick<SkillDefinition, 'provider' | 'resourceB
 
 function escapeAttr(value: string): string {
   return value.replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;')
+}
+
+/**
+ * The opening `<` plus tag name of every framing tag or `<system-reminder`
+ * prefix, opening or closing, in any letter case. Matching the name (not just
+ * the `<`) leaves every other angle bracket in a skill body untouched.
+ */
+const FRAMING_TAG_START = /<(\/?skill_(?:content|instructions|resources)|\/?system-reminder)/gi
+
+/**
+ * Escape the opening `<` of every framing-tag sequence in a skill body so a
+ * loaded body cannot open or close the tags {@link renderSkillContent} emits
+ * or forge a sibling `<system-reminder` block. Only the matched `<` becomes
+ * `&lt;`; every other byte of the body, including the closing `>` of a matched
+ * tag, is unchanged.
+ * @param content - raw skill body from any provider.
+ * @returns the body with framing-tag `<` characters entity-escaped.
+ */
+function escapeFramingTags(content: string): string {
+  return content.replaceAll(FRAMING_TAG_START, '&lt;$1')
 }
 
 /**
