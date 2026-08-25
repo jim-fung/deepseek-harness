@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { Buffer } from 'node:buffer'
 import { PassThrough } from 'node:stream'
 import { LocalPtySession } from '@deepseek-ai/dsh-terminal-bash/src/session.ts'
 import type { ResolvedConfig } from '@deepseek-ai/dsh-terminal-bash/src/config.ts'
@@ -98,6 +99,10 @@ class FakeTerminal implements SubprocessTerminalHandle {
       : { processGroupId, inputWaiting: this.inspector.isStdinWaiting() }
   }
 
+  noteSendSettled(): Promise<void> {
+    return Promise.resolve()
+  }
+
   async signalForeground(signal: SubprocessTerminalSignal): Promise<number> {
     const foreground = await this.inspectForeground()
     if (foreground === undefined) throw new Error(`cannot resolve foreground process group for terminal ${this.pid}`)
@@ -141,6 +146,56 @@ function config(overrides: Partial<ResolvedConfig> = {}): ResolvedConfig {
     disposeGraceMs: 20,
     ...overrides,
   }
+}
+
+/**
+ * Reference scrollback oracle: the pre-chunked whole-string semantics (append,
+ * drop whole leading lines past `maxLines`, keep the longest code-point suffix
+ * fitting `maxBytes`), written independently of the production buffer so the
+ * two must agree. O(n²); only for small caps in tests.
+ * @param chunks - the decoded text pieces appended in order.
+ * @param maxBytes - retained UTF-8 byte cap.
+ * @param maxLines - retained line cap.
+ * @returns the final retained text and its truncation flag.
+ */
+function naiveScrollback(
+  chunks: readonly string[],
+  maxBytes: number,
+  maxLines: number,
+): { text: string; truncated: boolean } {
+  const longestFittingSuffix = (text: string): string => {
+    const chars = Array.from(text)
+    for (let keep = 0; keep <= chars.length; keep += 1) {
+      const candidate = chars.slice(keep).join('')
+      if (Buffer.byteLength(candidate) <= maxBytes) return candidate
+    }
+    return ''
+  }
+  let value = ''
+  let truncated = false
+  for (const chunk of chunks) {
+    if (chunk.length === 0) continue
+    value += chunk
+    while (value.split('\n').length > maxLines) {
+      value = value.slice(value.indexOf('\n') + 1)
+      truncated = true
+    }
+    const fitted = longestFittingSuffix(value)
+    if (fitted !== value) truncated = true
+    value = fitted
+  }
+  return { text: value, truncated }
+}
+
+/** Deterministic append corpus mixing 1-4 byte code points and newline shapes. */
+function seededChunks(seed: number, count: number): string[] {
+  const pieces = ['a', 'bb', '一', '€', 'é', '𝄞', '\n', 'x\ny', 'zz\n', 'é𝄞\n一']
+  let state = seed
+  const next = (): number => {
+    state = (state * 1_103_515_245 + 12_345) % 2 ** 31
+    return state
+  }
+  return Array.from({ length: count }, () => pieces[next() % pieces.length] as string)
 }
 
 afterEach(() => { vi.useRealTimers() })
@@ -1466,6 +1521,81 @@ describe('LocalPtySession bounds, signals, and teardown', () => {
     await vi.advanceTimersByTimeAsync(60)
     await tinyOperation.done
     expect(tiny.read({ offset: 0, count: 1 }).text).toBe('')
+  })
+
+  it('reassembles a code point split across byte appends before eviction accounting', () => {
+    const caps = { scrollbackLines: 100, scrollbackMaxBytes: 8, maxReadBytes: 8 }
+    const terminal = new FakeTerminal()
+    const session = new LocalPtySession(terminal, config(caps))
+    terminal.emitBytes(Uint8Array.from([0xf0, 0x9d]))
+    terminal.emitBytes(Uint8Array.from([0x84, 0x9e]))
+    terminal.emitData('€€\nab')
+    // The streaming decoder delivers '𝄞' whole; the byte cap then cuts 5 bytes
+    // at a code-point boundary, dropping '𝄞€' (7 bytes) instead of splitting a character.
+    const expected = naiveScrollback(['𝄞', '€€\nab'], caps.scrollbackMaxBytes, caps.scrollbackLines)
+    expect(expected.text).toBe('€\nab')
+    const page = session.read({ offset: 0, count: 1_000 })
+    expect(page.text).toBe(expected.text)
+    expect(page.truncated).toBe(expected.truncated)
+    expect(page.totalLines).toBe(2)
+  })
+
+  it('keeps multibyte characters whole across many appends under eviction', () => {
+    const caps = { scrollbackLines: 4, scrollbackMaxBytes: 9, maxReadBytes: 9 }
+    const pieces = ['€', 'x', '€', '€', 'y€', 'z', '𝄞', 'ab', '\n一\n二\n三']
+    const terminal = new FakeTerminal()
+    const session = new LocalPtySession(terminal, config(caps))
+    for (const piece of pieces) terminal.emitData(piece)
+    const expected = naiveScrollback(pieces, caps.scrollbackMaxBytes, caps.scrollbackLines)
+    const page = session.read({ offset: 0, count: 1_000 })
+    expect(page.text).toBe(expected.text)
+    expect(page.truncated).toBe(expected.truncated)
+    expect(page.text).not.toContain('�')
+  })
+
+  it('produces byte-identical scrollback to the naive reference across many cap overflows', () => {
+    const caps = { scrollbackLines: 7, scrollbackMaxBytes: 40, maxReadBytes: 40 }
+    const pieces = [...seededChunks(0xd5_c0f_fee, 600), 'q\nr\ns']
+    const terminal = new FakeTerminal()
+    const session = new LocalPtySession(terminal, config(caps))
+    for (const piece of pieces) terminal.emitData(piece)
+    const expected = naiveScrollback(pieces, caps.scrollbackMaxBytes, caps.scrollbackLines)
+    const lines = expected.text.split('\n')
+
+    const page = session.read({ offset: 0, count: 100_000 })
+    expect(page.text).toBe(expected.text)
+    expect(page.truncated).toBe(expected.truncated)
+    expect(page.totalLines).toBe(lines.length)
+
+    const tail = session.read({ offset: 1, count: 2 })
+    expect(tail.text).toBe(lines.slice(Math.max(0, lines.length - 3), lines.length - 1).join('\n'))
+    expect(tail.totalLines).toBe(lines.length)
+    expect(tail.lineEnd).toBe(3)
+  })
+
+  it('resolves line boundaries across appended chunks by index', () => {
+    const terminal = new FakeTerminal()
+    const session = new LocalPtySession(terminal, config())
+    for (const piece of ['a\n', 'b\n', 'c\nd\n', 'e']) terminal.emitData(piece)
+    expect(session.read({ offset: 1, count: 1 })).toMatchObject({ text: 'd', totalLines: 5, lineBegin: 1, lineEnd: 2 })
+    expect(session.read({ offset: 1, count: 2 }).text).toBe('c\nd')
+    expect(session.read({ offset: 0, count: 5 }).text).toBe('a\nb\nc\nd\ne')
+
+    const wholeTerminal = new FakeTerminal()
+    const whole = new LocalPtySession(wholeTerminal, config())
+    wholeTerminal.emitData('a\nb\nc\nd\ne')
+    expect(whole.read({ offset: 1, count: 2 }).text).toBe('c\nd')
+  })
+
+  it('contains a failed settle-time adoption scan without disturbing the settled send', async () => {
+    vi.useFakeTimers()
+    const terminal = new FakeTerminal()
+    const session = new LocalPtySession(terminal, config())
+    terminal.noteSendSettled = () => Promise.reject(new Error('process table unavailable'))
+    await initialize(session, terminal)
+    const operation = session.startSend({ text: '', submit: false })
+    await vi.advanceTimersByTimeAsync(60)
+    expect((await operation.done).waitReason).toBe('inferred_idle')
   })
 
   it('signals verified groups and refuses unresolved or shell-targeted hard kills', async () => {

@@ -42,40 +42,257 @@ function utf8Tail(text: string, maxBytes: number): { text: string; truncated: bo
   return { text: chars.slice(start).join(''), truncated: true }
 }
 
+/**
+ * UTF-8 encoded size of one code point. Unpaired surrogates encode as U+FFFD,
+ * matching `Buffer.byteLength` for any string scanned code point by code point.
+ * @param point - a full Unicode code point.
+ * @returns its UTF-8 byte length, 1 through 4.
+ */
+function codePointBytes(point: number): number {
+  if (point < 0x80) return 1
+  if (point < 0x800) return 2
+  if (point < 0x10000) return 3
+  return 4
+}
+
+/** One retained append with its precomputed UTF-8 byte length and newline char offsets. */
+interface TextChunk {
+  readonly text: string
+  readonly bytes: number
+  /** Ascending char offsets of every '\n' in `text`. */
+  readonly newlines: readonly number[]
+}
+
+/**
+ * Bounded retained-text window over an append-only stream. Text is kept as
+ * chunks with per-chunk UTF-8 byte and newline accounting, so eviction drops
+ * whole leading chunks in O(1) or cuts a code-point-aligned prefix of the head
+ * chunk: a steady-state append at the cap costs O(append), not one pass over
+ * the whole retained text. The two caps compose in a fixed order per append —
+ * whole leading lines first, then the longest code-point-aligned suffix that
+ * fits `maxBytes` — and a byte cut may start mid-line, with the surviving
+ * fragment counting as a line for later evictions.
+ *
+ * Chunks must carry complete code point sequences (the session's streaming
+ * decoder guarantees this): per-chunk byte sums equal the joined text's byte
+ * length only when no surrogate pair is split across an append boundary.
+ */
 class BoundedTextBuffer {
-  private value = ''
+  private chunks: TextChunk[] = []
+  /** Prefix of `chunks[0]` already dropped, in chars, bytes, and newline entries. */
+  private headChar = 0
+  private headBytes = 0
+  private headNewlines = 0
+  private chars = 0
+  private bytes = 0
+  private newlines = 0
   private dropped = false
+  private joined: string | undefined
 
   constructor(
     private readonly maxBytes: number,
     private readonly maxLines?: number,
   ) {}
 
+  /** True once any append evicted or truncated retained text since the last `consume()`. */
+  get truncated(): boolean {
+    return this.dropped
+  }
+
+  /** True while no text is retained. */
+  get isEmpty(): boolean {
+    return this.chars === 0
+  }
+
+  /**
+   * @returns the retained line count: 0 when nothing is retained, otherwise one per '\n' plus the trailing (possibly partial) line.
+   */
+  lineCount(): number {
+    return this.chars === 0 ? 0 : this.newlines + 1
+  }
+
+  /**
+   * Retain one more piece of output, then enforce the caps in order.
+   * @param text - decoded output text; must not split a surrogate pair across appends.
+   */
   append(text: string): void {
     if (text.length === 0) return
-    this.value += text
-    if (this.maxLines !== undefined) {
-      const lines = this.value.split('\n')
-      if (lines.length > this.maxLines) {
-        this.value = lines.slice(lines.length - this.maxLines).join('\n')
-        this.dropped = true
-      }
-    }
-    const tail = utf8Tail(this.value, this.maxBytes)
-    this.value = tail.text
-    this.dropped ||= tail.truncated
+    const newlines: number[] = []
+    for (let at = text.indexOf('\n'); at >= 0; at = text.indexOf('\n', at + 1)) newlines.push(at)
+    const bytes = Buffer.byteLength(text)
+    this.chunks.push({ text, bytes, newlines })
+    this.chars += text.length
+    this.bytes += bytes
+    this.newlines += newlines.length
+    this.joined = undefined
+    this.evictLines()
+    this.evictBytes()
   }
 
   consume(): TerminalSendRead {
-    const delta = this.value
+    const delta = this.retainedText()
     const truncated = this.dropped
-    this.value = ''
+    this.chunks = []
+    this.headChar = 0
+    this.headBytes = 0
+    this.headNewlines = 0
+    this.chars = 0
+    this.bytes = 0
+    this.newlines = 0
     this.dropped = false
+    this.joined = undefined
     return { delta, truncated }
   }
 
   snapshot(): { text: string; truncated: boolean } {
-    return { text: this.value, truncated: this.dropped }
+    return { text: this.retainedText(), truncated: this.dropped }
+  }
+
+  /**
+   * Extract the retained text spanning whole lines `[startLine, endLine)`.
+   * @param startLine - first line index, 0-based from the front of the retained text.
+   * @param endLine - exclusive upper line index, at most `lineCount()`; greater than `startLine`.
+   * @returns the selected lines joined by their separating newlines.
+   */
+  linesText(startLine: number, endLine: number): string {
+    const start = startLine === 0 ? 0 : this.newlinePosition(startLine - 1) + 1
+    const end = endLine - 1 >= this.newlines ? this.chars : this.newlinePosition(endLine - 1)
+    return this.substring(start, end)
+  }
+
+  /** Concatenate the retained fragments; cached until the next mutation. */
+  private retainedText(): string {
+    this.joined ??= (() => {
+      const parts: string[] = []
+      for (let index = 0; index < this.chunks.length; index += 1) {
+        const chunk = this.chunks[index] as TextChunk
+        parts.push(index === 0 ? chunk.text.slice(this.headChar) : chunk.text)
+      }
+      return parts.join('')
+    })()
+    return this.joined
+  }
+
+  /**
+   * Drop while more than `maxLines` lines are retained, always through the oldest newline.
+   */
+  private evictLines(): void {
+    if (this.maxLines === undefined) return
+    while (this.newlines + 1 > this.maxLines) {
+      const head = this.chunks[0] as TextChunk
+      if (this.headNewlines === head.newlines.length) {
+        this.dropHeadChunk()
+        continue
+      }
+      this.dropHeadPrefix((head.newlines[this.headNewlines] as number) + 1)
+    }
+  }
+
+  /**
+   * Drop the smallest code-point-aligned prefix whose byte count covers the bytes over cap.
+   */
+  private evictBytes(): void {
+    let excess = this.bytes - this.maxBytes
+    while (excess > 0) {
+      const head = this.chunks[0] as TextChunk
+      if (head.bytes - this.headBytes <= excess) {
+        excess -= head.bytes - this.headBytes
+        this.dropHeadChunk()
+        continue
+      }
+      let cutLocal = this.headChar
+      let covered = 0
+      while (covered < excess) {
+        const point = head.text.codePointAt(cutLocal) as number
+        covered += codePointBytes(point)
+        cutLocal += point > 0xffff ? 2 : 1
+      }
+      this.dropHeadPrefix(cutLocal)
+      return
+    }
+  }
+
+  private dropHeadChunk(): void {
+    const head = this.chunks.shift() as TextChunk
+    this.chars -= head.text.length - this.headChar
+    this.bytes -= head.bytes - this.headBytes
+    this.newlines -= head.newlines.length - this.headNewlines
+    this.headChar = 0
+    this.headBytes = 0
+    this.headNewlines = 0
+    this.dropped = true
+    this.joined = undefined
+  }
+
+  /**
+   * Drop the head chunk's chars below `cutLocal`.
+   * @param cutLocal - exclusive char boundary inside the head chunk's text, at a code point boundary.
+   */
+  private dropHeadPrefix(cutLocal: number): void {
+    const head = this.chunks[0] as TextChunk
+    let removedBytes = 0
+    for (let index = this.headChar; index < cutLocal; ) {
+      const point = head.text.codePointAt(index) as number
+      removedBytes += codePointBytes(point)
+      index += point > 0xffff ? 2 : 1
+    }
+    let droppedNewlines = 0
+    while (this.headNewlines + droppedNewlines < head.newlines.length
+      && (head.newlines[this.headNewlines + droppedNewlines] as number) < cutLocal) {
+      droppedNewlines += 1
+    }
+    this.chars -= cutLocal - this.headChar
+    this.bytes -= removedBytes
+    this.newlines -= droppedNewlines
+    this.headChar = cutLocal
+    this.headBytes += removedBytes
+    this.headNewlines += droppedNewlines
+    this.dropped = true
+    this.joined = undefined
+  }
+
+  /**
+   * Locate one retained newline.
+   * @param m - retained-newline ordinal; below `newlines`.
+   * @returns its char offset within the retained text.
+   */
+  private newlinePosition(m: number): number {
+    let base = 0
+    for (let index = 0; index < this.chunks.length; index += 1) {
+      const chunk = this.chunks[index] as TextChunk
+      const head = index === 0
+      const firstNewline = head ? this.headNewlines : 0
+      const available = chunk.newlines.length - firstNewline
+      if (m < available) return base + (chunk.newlines[firstNewline + m] as number) - (head ? this.headChar : 0)
+      base += chunk.text.length - (head ? this.headChar : 0)
+      m -= available
+    }
+    /* v8 ignore next -- callers pass m below the retained newline count, which some chunk holds. */
+    throw new Error('terminal-bash: newline index outside the retained scrollback')
+  }
+
+  /**
+   * Slice the retained text by char offsets without joining it.
+   * @param from - inclusive start char offset.
+   * @param to - exclusive end char offset, at most `chars`.
+   * @returns the selected substring.
+   */
+  private substring(from: number, to: number): string {
+    const parts: string[] = []
+    let base = 0
+    for (let index = 0; index < this.chunks.length && base < to; index += 1) {
+      const chunk = this.chunks[index] as TextChunk
+      const chunkStart = index === 0 ? this.headChar : 0
+      const length = chunk.text.length - chunkStart
+      if (base + length > from) {
+        parts.push(chunk.text.slice(
+          chunkStart + Math.max(0, from - base),
+          chunkStart + Math.min(to - base, length),
+        ))
+      }
+      base += length
+    }
+    return parts.join('')
   }
 }
 
@@ -350,19 +567,17 @@ export class LocalPtySession implements TerminalBackendSession {
   }
 
   read(request: TerminalReadRequest): TerminalReadResult {
-    const snapshot = this.scrollback.snapshot()
-    const lines = snapshot.text.split('\n')
-    const totalLines = snapshot.text.length === 0 ? 0 : lines.length
+    const totalLines = this.scrollback.lineCount()
     const offset = request.offset ?? 0
     const count = request.count ?? 500
     if (!Number.isSafeInteger(offset) || offset < 0) throw new Error('PTY read offset must be a non-negative safe integer')
     if (!Number.isSafeInteger(count) || count <= 0) throw new Error('PTY read count must be a positive safe integer')
     if (offset >= totalLines) {
-      return { text: '', totalLines, lineBegin: offset, lineEnd: offset, truncated: snapshot.truncated }
+      return { text: '', totalLines, lineBegin: offset, lineEnd: offset, truncated: this.scrollback.truncated }
     }
     const end = totalLines - offset
     const start = Math.max(0, end - count)
-    const requested = lines.slice(start, end).join('\n')
+    const requested = this.scrollback.linesText(start, end)
     const bounded = utf8Tail(requested, this.config.maxReadBytes)
     const returnedLines = bounded.text.length === 0 ? 0 : bounded.text.split('\n').length
     return {
@@ -370,7 +585,7 @@ export class LocalPtySession implements TerminalBackendSession {
       totalLines,
       lineBegin: offset,
       lineEnd: offset + returnedLines,
-      truncated: snapshot.truncated || bounded.truncated,
+      truncated: this.scrollback.truncated || bounded.truncated,
     }
   }
 
@@ -495,7 +710,7 @@ export class LocalPtySession implements TerminalBackendSession {
         return
       }
       const elapsed = Date.now() - operation.startedAt
-      const startupHasOutput = !this.initializing || this.scrollback.snapshot().text.length > 0
+      const startupHasOutput = !this.initializing || !this.scrollback.isEmpty
       const acceptsStdinWait = startupHasOutput && foreground !== undefined
         && operation.acceptsStdinWait(foreground.processGroupId, foreground.inputWaiting)
       if (elapsed >= this.config.exactProbeAfterMs && acceptsStdinWait) {
@@ -620,7 +835,7 @@ export class LocalPtySession implements TerminalBackendSession {
   private settleActive(waitReason: TerminalWaitReason, retainOwnership = false): void {
     const operation = this.active
     if (operation === undefined) return
-    const scrollbackTruncated = this.scrollback.snapshot().truncated
+    const scrollbackTruncated = this.scrollback.truncated
     if (retainOwnership) {
       this.stopPolling()
       this.activeAbort?.()
@@ -629,6 +844,15 @@ export class LocalPtySession implements TerminalBackendSession {
       this.clearActive()
     }
     operation.settle(waitReason, this.statusValue, scrollbackTruncated)
+    if (waitReason !== 'session_exit') {
+      // The settled send is the provider's adoption point for members its
+      // command spawned; after the shell exits, a teardown scan can no longer
+      // see members that already left the process tree. Session exit needs no
+      // adoption — the shell is gone and teardown re-scans.
+      void this.terminal.noteSendSettled().catch((_adoptionScanFailed: unknown) => {
+        // The send is already settled; teardown re-scans and reports survivors.
+      })
+    }
   }
 
   private stopPolling(): void {
