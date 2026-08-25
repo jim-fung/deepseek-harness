@@ -48,6 +48,12 @@ interface MeasurementAnchor {
 }
 
 interface ReplayState {
+  /**
+   * Log position this fold has reached. Reads advance the cursor lazily at
+   * read time — there is no per-append work — so catch-up costs O(events
+   * appended since the previous read) amortized, which alone bounds ordinary
+   * read latency, and appends never rescan or copy the log for the meter.
+   */
   consumedEvents: number
   header: EpochHeader | undefined
   surface: MeterSurfaceNode[]
@@ -102,12 +108,6 @@ export class TokenMeter extends Service {
     ctx.sessionProjections.register(tokenUsageProjectionDefinition)
     ctx.sessionProjections.register(contextPressureProjectionDefinition)
     ctx.sessionProjections.register(contextBreakdownProjectionDefinition)
-
-    // Readers catch up independently, while eager observation bounds ordinary
-    // read latency without creating state for sessions no consumer has read.
-    ctx.on('session/event', (session) => {
-      if (this.states.has(session)) this._sync(session)
-    })
   }
 
   /**
@@ -193,7 +193,11 @@ export class TokenMeter extends Service {
     return estimateMessage(message)
   }
 
-  /** Catch one session's fold up to the current durable tail. */
+  /**
+   * Catch one session's fold up to the current durable tail. Driven only by
+   * reads; the incremental cursor keeps each call proportional to the events
+   * appended since the session's previous read.
+   */
   private _sync(session: Session): ReplayState {
     let state = this.states.get(session)
     if (state === undefined) {

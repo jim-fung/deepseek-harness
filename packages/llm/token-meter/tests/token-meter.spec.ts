@@ -1,4 +1,4 @@
-import { describe, expect, expectTypeOf, it } from 'vitest'
+import { describe, expect, expectTypeOf, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { createUserMessage, ToolCallId, createMessage } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, Message, TokenUsage } from '@deepseek-ai/dsh-llm'
@@ -429,6 +429,54 @@ describe('replay anchors and surface folds', () => {
     expect(before.surfaceDeltaTokens).toBeGreaterThan(0)
   })
 
+  it('folds later appends lazily: totals stay correct without any intermediate read', () => {
+    const service = meter()
+    const session = Session.create(SessionId('lazy-catchup'))
+    appendHeader(session, header('deepseek-v4-flash'))
+    session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'question' }],
+      source: { kind: 'user' },
+    }), { surfaceOp: 'append' })
+    // The first read creates the replay state mid-log.
+    expect(service.measure(session).logRevision).toBe(2)
+
+    appendSuccessfulCall(session, header('deepseek-v4-flash'), { usage: USAGE })
+    appendSuccessfulCall(session, header('deepseek-v4-flash'), {
+      turn: 1,
+      step: 2,
+      usage: { inputTokens: 100, outputTokens: 50 },
+      providerText: 'beta response',
+    })
+
+    const caught = service.measure(session)
+    expect(caught.logRevision).toBe(session.events.length)
+    expect(caught.baseline).toMatchObject({ kind: 'usage', tokens: 150 })
+    expect(caught.nodes).toHaveLength(3)
+    expectSurfaceTotal(caught)
+  })
+
+  it('does not rescan folded events on repeated reads', () => {
+    const service = meter()
+    const session = Session.create(SessionId('no-rescan'))
+    appendSuccessfulCall(session, header('deepseek-v4-flash'), { usage: USAGE })
+    session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'tail' }],
+      source: { kind: 'user' },
+    }), { surfaceOp: 'append' })
+    service.measure(session)
+
+    // A read with no new events consults the log only for its up-to-date
+    // check: one `events` access per call, never a traversal of the fold.
+    const eventsReads = vi.spyOn(Session.prototype, 'events', 'get')
+    const first = service.measure(session)
+    const second = service.measure(session)
+    const third = service.measure(session)
+    expect(eventsReads).toHaveBeenCalledTimes(3)
+    expect(second).toEqual(first)
+    expect(third).toEqual(first)
+    eventsReads.mockRestore()
+  })
+
   it('prices an empty assistant surface anchor as zero', () => {
     const session = Session.create(SessionId('empty-assistant'))
     appendSuccessfulCall(session, header('deepseek-v4-flash'), {
@@ -690,7 +738,7 @@ describe('malformed replay and listener lifecycle', () => {
     expectRepeatedFailure(meter(), session, /invalid current range/)
   })
 
-  it('handles earlier-reader catch-up, eager observation, and service reload', async () => {
+  it('handles listener-driven reads, lazy catch-up, and service reload', async () => {
     const ctx = new Context()
     await ctx.plugin(SessionStore)
     await ctx.plugin(SessionProjectionRegistry)
