@@ -99,6 +99,7 @@ type StubMode =
   | 'empty-page-after-latest'
   | 'paged-scrollback'
   | 'exit-after-send'
+  | 'stream-window'
 
 class StubPtySession implements TerminalBackendSession {
   readonly motd = 'stub> '
@@ -111,6 +112,8 @@ class StubPtySession implements TerminalBackendSession {
   pendingText = ''
   historyTruncated = false
   throwOnSend = false
+  streamStart = ''
+  streamQueue: Array<(start: string) => { delta: string; viewport: string; reason: TerminalWaitReason }> = []
 
   constructor(mode: StubMode) {
     this.mode = mode
@@ -165,6 +168,17 @@ class StubPtySession implements TerminalBackendSession {
       const output = `bash: syntax error${newline}${this.motd}${newline}`
       this.scrollback += output
       return this.operation(Promise.resolve(this.result(output, 'stdin_read')))
+    }
+    if (this.mode === 'stream-window') {
+      // Streams one queued incremental chunk per poll; the scrollback stays
+      // marker-free, so partial output must recover through the fallback.
+      if (request.text.length > 0) {
+        this.streamStart = /__DSH_PERSISTENT_BASH_START_[^_]+(?:-[^_]+)*__/.exec(request.text)?.[0] ?? ''
+      }
+      const next = this.streamQueue.shift()
+      if (next === undefined) throw new Error('stream-window queue exhausted before the command settled')
+      const chunk = next(this.streamStart)
+      return this.operation(Promise.resolve(this.result(chunk.viewport, chunk.reason)), chunk.delta)
     }
     const sent = request.text.length > 0 ? request.text : this.pendingText
     this.pendingText = ''
@@ -475,6 +489,63 @@ describe('tool-bash-persistent', () => {
     // The backend owns the prompt text, so the fallback retains it verbatim.
     expect(result.endsWith('stub> ')).toBe(true)
     expect(result).not.toContain('DSH_PERSISTENT_BASH_START')
+  })
+
+  it('streams partial output within the fallback window identically to uncapped accumulation', async () => {
+    const { ctx, owner, stub } = await setup({ backendType: 'stub', maxOutputChars: 1_000 })
+    await call(ctx, owner, 'warm up')
+    const session = stub.sessions[0]!
+    session.mode = 'stream-window'
+    session.scrollback = ''
+    session.streamQueue = [
+      () => ({ delta: 'PRE\n', viewport: 'stub> ', reason: 'inferred_idle' }),
+      start => ({ delta: `${start}\nHEAD\n${'x'.repeat(30_000)}`, viewport: 'stub> ', reason: 'inferred_idle' }),
+      () => ({ delta: 'TAIL', viewport: 'stub> ', reason: 'stdin_read' }),
+    ]
+    const result = text(await call(ctx, owner, 'stream within window'))
+    // Uncapped reference: the whole post-marker stream, clipped to maxOutputChars;
+    // pre-marker output is not part of marker-anchored recovery.
+    const reference = `HEAD\n${'x'.repeat(30_000)}TAIL`
+    expect(result.startsWith(reference.slice(0, 1_000))).toBe(true)
+    expect(result).not.toContain('PRE')
+    expect(result).toContain('<response clipped>')
+    expect(result).not.toContain('beginning of this command output was dropped')
+  })
+
+  it('freezes the fallback window past the start marker and reports the cap as incomplete', async () => {
+    const { ctx, owner, stub } = await setup({ backendType: 'stub', maxOutputChars: 1_000 })
+    await call(ctx, owner, 'warm up')
+    const session = stub.sessions[0]!
+    session.mode = 'stream-window'
+    session.scrollback = ''
+    session.streamQueue = [
+      start => ({ delta: `${start}\nHEAD\n${'x'.repeat(70_000)}`, viewport: 'stub> ', reason: 'inferred_idle' }),
+      () => ({ delta: 'AFTER-FREEZE', viewport: 'stub> ', reason: 'stdin_read' }),
+    ]
+    const result = text(await call(ctx, owner, 'stream past window'))
+    // Uncapped accumulation would settle this stream (marker recovered, no end
+    // marker in it), so the cap is observable as the incomplete verdict; the
+    // recovered output still starts at command start and the post-freeze
+    // delta is dropped instead of accumulating for the command's lifetime.
+    expect(result).toContain('beginning of this command output was dropped')
+    expect(result).toContain('<response clipped>')
+    expect(result).toContain(`HEAD\n${'x'.repeat(995)}`)
+    expect(result).not.toContain('AFTER-FREEZE')
+  })
+
+  it('clears the window cap when a viewport replacement restarts the fallback', async () => {
+    const { ctx, owner, stub } = await setup({ backendType: 'stub', maxOutputChars: 1_000 })
+    await call(ctx, owner, 'warm up')
+    const session = stub.sessions[0]!
+    session.mode = 'stream-window'
+    session.scrollback = ''
+    session.streamQueue = [
+      start => ({ delta: `${start}\nHEAD\n${'x'.repeat(70_000)}`, viewport: 'stub> ', reason: 'inferred_idle' }),
+      start => ({ delta: '', viewport: `${start}\nRECOVERED\n`, reason: 'stdin_read' }),
+    ]
+    // A stale cap would wrap the marker-anchored recovery in the lost-prefix
+    // and clipping notices; the replacement restarts from the viewport clean.
+    expect(text(await call(ctx, owner, 'viewport restart'))).toBe('RECOVERED')
   })
 
   it('does not attribute old scrollback truncation to a complete current command', async () => {

@@ -146,6 +146,7 @@ These limits define when the tool is a poor fit or needs special care. They are 
 - **The tool requires an owning Agent and a real PTY backend** — agent-less calls and backends that cannot start an interactive shell fail.
 - **An interactive foreground child returns early with partial output only where the subprocess provider proves its stdin wait** — elsewhere the call runs to `timeoutMs`.
 - **Explicit `exit` and timeout discard shell state** — cancellation also resets and discards the result, even when a complete status marker is already observable; the next call starts a fresh shell.
+- **Partial-output recovery keeps the start marker plus a fixed 64KB window of following output.** Once the marker has scrolled out of the terminal scrollback and the command emits past the window, further bytes are dropped and the result is marked incomplete rather than pinning host memory for the command's lifetime; at the default `maxOutputChars` (16000) nothing model-visible changes, while a deployment raising it far above the default caps such recovery at the window.
 - **Environment facts such as network access and package mirrors belong in the configured `description`** — not this package's default.
 
 <a id="dev-note"></a>

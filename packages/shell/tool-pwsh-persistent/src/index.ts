@@ -23,6 +23,11 @@ const TIMEOUT_CODE = 'PERSISTENT_PWSH_TIMEOUT'
 // scrollback is assembled only when a command settles or needs partial output.
 const SCROLLBACK_PAGE_LINES = 1_000
 const POLL_INTERVAL_MS = 25
+// The fallback only serves recovery of output from the start marker, of which
+// rendering keeps the first `maxOutputChars` characters. Once the marker plus
+// this many bytes past it are retained, later deltas are dropped so a
+// command's total output cannot pin host memory for its whole lifetime.
+const FALLBACK_WINDOW_BYTES = 65_536
 
 const DEFAULT_DESCRIPTION = 'Run commands in a persistent PowerShell shell. State, including the current directory and exported environment variables, persists across calls for this agent.'
 
@@ -348,6 +353,7 @@ async function executeCommand(
   let first = true
   let fallback = ''
   let fallbackTruncated = false
+  let fallbackWindowed = false
 
   while (true) {
     // The shell may flip to exited between iterations (a fast `exit` can
@@ -375,7 +381,27 @@ async function executeCommand(
       throw error
     }
     const incremental = operation.readOutput()
-    fallback = incremental.delta.length > 0 ? fallback + incremental.delta : result.viewport
+    // The fallback is consulted only after the start marker has scrolled out
+    // of the scrollback, and only the first `maxOutputChars` characters of the
+    // recovered output are rendered: past FALLBACK_WINDOW_BYTES beyond the
+    // marker the retained window is frozen. A viewport replacement restarts
+    // accumulation from the viewport and clears both flags.
+    if (incremental.delta.length === 0) {
+      fallback = result.viewport
+      fallbackTruncated = false
+      fallbackWindowed = false
+    } else if (!fallbackWindowed) {
+      fallback += incremental.delta
+      const markerStart = fallback.lastIndexOf(marker.start)
+      if (markerStart >= 0) {
+        const windowEnd = markerStart + marker.start.length + FALLBACK_WINDOW_BYTES
+        if (fallback.length > windowEnd) {
+          fallback = fallback.slice(markerStart, windowEnd)
+          fallbackTruncated = true
+          fallbackWindowed = true
+        }
+      }
+    }
     fallbackTruncated ||= incremental.truncated || result.truncated
     const latest = ctx.terminals.read(owner, id, { offset: 0, count: SCROLLBACK_PAGE_LINES })
     const timedOut = timeoutOf(commandDeadline.signal, TIMEOUT_CODE)
