@@ -159,6 +159,18 @@ export async function syncTools(
           `mcp-client(${opts.serverName}): server listed tool "${tool.name}" more than once — invalid tool list`,
         )
       }
+      // The input schema rides verbatim into every provider request, so an
+      // unenforceable one must not be registered under a degraded shape either
+      // (the model would call blind). Skip the one tool loudly; its siblings
+      // stay usable. Contrast the output schema, whose fallback only relaxes
+      // optional result validation.
+      if (!supportedInputSchema(tool.inputSchema)) {
+        ctx.logger.error(
+          `mcp-client(${opts.serverName}): tool "${tool.name}" advertises an input schema outside `
+          + 'the supported subset — tool not registered; fix or remove it on the MCP server',
+        )
+        continue
+      }
       definitions.set(publicName, createDefinition(
         client,
         ctx,
@@ -226,6 +238,23 @@ function supportedOutputSchema(candidate: unknown): JsonSchemaNode | undefined {
     return candidate
   } catch {
     return undefined
+  }
+}
+
+/**
+ * Gate the advertised input schema on the enforced subset. Unlike the output
+ * schema, an unsupported input schema has no safe fallback — the definition
+ * is skipped by the caller rather than registered with degraded parameters.
+ * @param candidate - the raw `inputSchema` from the server's tool list.
+ * @returns Whether the schema can ride into model requests as advertised.
+ */
+function supportedInputSchema(candidate: unknown): boolean {
+  if (candidate === undefined) return false
+  try {
+    assertSupportedJsonSchema(candidate)
+    return true
+  } catch {
+    return false
   }
 }
 

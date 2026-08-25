@@ -204,6 +204,22 @@ describe('syncTools', () => {
     expect(ctx.tools.get('add')).toBeUndefined()
   })
 
+  it('skips a tool whose input schema is outside the enforced subset and registers its siblings', async () => {
+    const errorSpy = vi.spyOn(ctx.logger, 'error')
+    const client = createMockClient([
+      { name: 'flexible', inputSchema: { anyOf: [{ type: 'string' }, { type: 'number' }] } },
+      { name: 'plain', inputSchema: { type: 'object', properties: {} } },
+    ])
+
+    const disposers = await syncTools(client as never, ctx, defaultOpts, new Map())
+
+    expect([...disposers.keys()]).toEqual(['mcp__srv__plain'])
+    expect(ctx.tools.get('mcp__srv__flexible')).toBeUndefined()
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining('tool "flexible" advertises an input schema outside the supported subset'),
+    )
+  })
+
   it('lets two servers publish the same raw name side by side', async () => {
     const clientA = createMockClient([{ name: 'search', inputSchema: { type: 'object' } }])
     const clientB = createMockClient([{ name: 'search', inputSchema: { type: 'object' } }])
