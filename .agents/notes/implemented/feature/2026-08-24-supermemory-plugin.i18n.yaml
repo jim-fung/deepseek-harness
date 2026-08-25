@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/feature/2026-08-24-supermemory-plugin.md
+2026-08-24-supermemory-plugin.md: 6f09130c184e683cf45a67265b6fefe5e26496f9
+2026-08-24-supermemory-plugin.zh.md: 9db483f49cc0f82df1693545d9add41589f29dcf

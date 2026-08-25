@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add a persistent-memory capability seam (`ctx.memory`) with a supermemory.ai provider, model-facing `memory_save`/`memory_search`/`memory_forget` tools, automatic profile recall into the system prompt, and an opt-in `supermemory` bundle — per the approved Agent Note at `.agents/notes/proposed/feature/2026-08-24-supermemory-plugin.md`.
+**Goal:** Add a persistent-memory capability seam (`ctx.memory`) with a supermemory.ai provider, model-facing `memory_save`/`memory_search`/`memory_forget` tools, automatic profile recall into the system prompt, and an opt-in `supermemory` bundle — per the approved Agent Note at `.agents/notes/implemented/feature/2026-08-24-supermemory-plugin.md`.
 
 **Architecture:** Three-package capability seam under a new group `packages/memory/`, mirroring the `web` seam (`packages/web/`): Service Definition (`dsh-memory`), Provider (`dsh-memory-supermemory`), Consumer (`dsh-tool-memory`), composed by a patch-layer bundle package under `packages/bundle/supermemory/`. Keyless snapshot coverage runs the real provider client against a localhost wire mock inside the existing `examples/headless-agent` snapshot harness.
 

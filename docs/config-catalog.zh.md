@@ -1513,6 +1513,26 @@ export interface ReconnectConfig {
 
 来源：[`packages/mcp/mcp-client/src/index.ts:98`](../packages/mcp/mcp-client/src/index.ts)
 
+<a id="deepseek-aidsh-memory-supermemory"></a>
+
+## `@deepseek-ai/dsh-memory-supermemory`
+
+需要：`memory`
+
+```ts config-catalog
+/** Plugin config. */
+export interface Config {
+  /** Env var name holding the supermemory API key. Falls back to the launch environment, then the Codex credentials file. */
+  apiKeyEnv?: string
+  /** Endpoint base for the supermemory API. */
+  baseURL?: string
+  /** Prefix for container tags partitioning scopes. */
+  containerTagPrefix?: string
+}
+```
+
+来源：[`packages/memory/memory-supermemory/src/index.ts:33`](../packages/memory/memory-supermemory/src/index.ts)
+
 <a id="deepseek-aidsh-message-feedback"></a>
 
 ## `@deepseek-ai/dsh-message-feedback`
@@ -2834,6 +2854,26 @@ export interface Config {
 
 来源：[`packages/lsp/tool-lsp/src/index.ts:57`](../packages/lsp/tool-lsp/src/index.ts)
 
+<a id="deepseek-aidsh-tool-memory"></a>
+
+## `@deepseek-ai/dsh-tool-memory`
+
+需要：`tools` · `memory` · `systemPrompt`
+
+```ts config-catalog
+/** Plugin config: which memory tools to register and whether recall injection is on. */
+export interface Config {
+  /** Register `memory_save`. Defaults to true. */
+  save?: boolean
+  /** Register `memory_search` and `memory_forget`. Defaults to true. */
+  searchAndForget?: boolean
+  /** Contribute the profile-recall section to every assembly. Defaults to true. */
+  recall?: boolean
+}
+```
+
+来源：[`packages/memory/tool-memory/src/index.ts:23`](../packages/memory/tool-memory/src/index.ts)
+
 <a id="deepseek-aidsh-tool-pwsh"></a>
 
 ## `@deepseek-ai/dsh-tool-pwsh`
@@ -3470,6 +3510,7 @@ export interface Config {
 - `@deepseek-ai/dsh-host-plugin-inventory` — 需要 `loader`（[`packages/host/plugin-inventory/src/index.ts`](../packages/host/plugin-inventory/src/index.ts)）
 - `@deepseek-ai/dsh-llm`（[`packages/llm/llm/src/index.ts`](../packages/llm/llm/src/index.ts)）
 - `@deepseek-ai/dsh-lsp`（[`packages/lsp/lsp/src/index.ts`](../packages/lsp/lsp/src/index.ts)）
+- `@deepseek-ai/dsh-memory`（[`packages/memory/memory/src/index.ts`](../packages/memory/memory/src/index.ts)）
 - `@deepseek-ai/dsh-schedule` — 需要 `agents` · `sessions` · `tools` · `sessionPersistence`（[`packages/schedule/schedule/src/index.ts`](../packages/schedule/schedule/src/index.ts)）
 - `@deepseek-ai/dsh-session`（[`packages/core/session/src/index.ts`](../packages/core/session/src/index.ts)）
 - `@deepseek-ai/dsh-session-checkpoint-policy` — 需要 `llm` · `sessionPersistence` · `sessions` · `tools`（[`packages/session/session-checkpoint-policy/src/index.ts`](../packages/session/session-checkpoint-policy/src/index.ts)）
@@ -3546,6 +3587,7 @@ export interface Config {
 - `@deepseek-ai/dsh-session-telemetry`（[`packages/session/session-telemetry/src/index.ts`](../packages/session/session-telemetry/src/index.ts)）
 - `@deepseek-ai/dsh-session-title-llm`（[`packages/session/session-title-llm/src/index.ts`](../packages/session/session-title-llm/src/index.ts)）
 - `@deepseek-ai/dsh-subagent-in-process-driver`（[`packages/subagent/subagent-in-process-driver/src/index.ts`](../packages/subagent/subagent-in-process-driver/src/index.ts)）
+- `@deepseek-ai/dsh-supermemory`（[`packages/bundle/supermemory/src/index.ts`](../packages/bundle/supermemory/src/index.ts)）
 - `@deepseek-ai/dsh-timeout`（[`packages/util/timeout/src/index.ts`](../packages/util/timeout/src/index.ts)）
 - `@deepseek-ai/dsh-typert-generator`（[`packages/typert/generator/src/index.ts`](../packages/typert/generator/src/index.ts)）
 - `@deepseek-ai/dsh-typert-protocol`（[`packages/typert/protocol/src/index.ts`](../packages/typert/protocol/src/index.ts)）

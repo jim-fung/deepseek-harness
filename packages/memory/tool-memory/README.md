@@ -40,11 +40,11 @@ Fixed per assembly while enabled; zero when both `save` and `searchAndForget` ar
 
 Stable repeated prefix across requests in one session; disabling either tool family or editing this text invalidates reuse from the next assembly.
 
-### Memory tool definitions
+### Tool schemas
 
 #### What the model sees
 
-The three registered tools' names, descriptions, and parameters as summarized in the table above: `memory_save(content, scope)`, `memory_search(query, scope, limit?)` with `limit` bounded to 1–25, and `memory_forget(id)`.
+The model sees the generated [`memory_save`, `memory_search`, and `memory_forget` schemas](../../../docs/tool-catalog.md#deepseek-aidsh-tool-memory), summarized in the table above: `memory_save(content, scope)`, `memory_search(query, scope, limit?)` with `limit` bounded to 1–25, and `memory_forget(id)`.
 
 #### Token effect
 

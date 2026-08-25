@@ -20,6 +20,7 @@ import SqliteSessionQueryEngine from '@deepseek-ai/dsh-session-query-sqlite'
 import GoalService from '@deepseek-ai/dsh-goal'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { type Config as ToolsConfig } from '@deepseek-ai/dsh-tools'
+import MemoryRuntime from '@deepseek-ai/dsh-memory'
 import LocalBashExecutor from '@deepseek-ai/dsh-bash-local'
 import * as BashEnvPlugin from '@deepseek-ai/dsh-shell-env'
 import { PwshLocalExecutor } from '@deepseek-ai/dsh-pwsh-local'
@@ -56,6 +57,7 @@ import * as ToolGoal from '@deepseek-ai/dsh-tool-goal'
 import * as ToolSchedule from '@deepseek-ai/dsh-schedule'
 import Lsp from '@deepseek-ai/dsh-lsp'
 import * as ToolLsp from '@deepseek-ai/dsh-tool-lsp'
+import * as ToolMemory from '@deepseek-ai/dsh-tool-memory'
 import * as ToolSkill from '@deepseek-ai/dsh-tool-skill'
 import * as ToolSessionQuery from '@deepseek-ai/dsh-tool-session-query'
 import * as ToolTasks from '@deepseek-ai/dsh-tool-jobs'
@@ -408,6 +410,22 @@ const TOOL_PACKAGES: ToolPackage[] = [
     },
     note:
       'The lsp tool keeps provider selection and language-server subprocesses behind ctx.lsp, so its model-visible schema stays stable across providers. Requires a registered provider (e.g. `@deepseek-ai/dsh-lsp-stdio`) at runtime; without one, a query returns the structured `LSP_UNAVAILABLE` error rather than changing the schema.',
+  },
+  {
+    pkg: '@deepseek-ai/dsh-tool-memory',
+    dir: 'tool-memory',
+    source: 'packages/memory/tool-memory/src/tools.ts',
+    requires: ['ctx.tools', 'ctx.memory', 'ctx.systemPrompt'],
+    writes: ['tool/call', 'tool/result'],
+    async mount(ctx) {
+      // The tools inject the seam; the bare Service Definition satisfies it
+      // because schemas do not depend on the provider (execution-time provider
+      // absence is a structured error, not a schema change).
+      await ctx.plugin(MemoryRuntime)
+      await ctx.plugin(ToolMemory)
+    },
+    note:
+      'The memory tools keep provider selection behind ctx.memory so model-visible schemas stay stable across memory backends. With no provider registered the tools stay visible and fail at execution with the structured `MEMORY_NO_PROVIDER` error; the project scope id is derived from the process working directory at execution time.',
   },
   {
     pkg: '@deepseek-ai/dsh-tool-ralph',

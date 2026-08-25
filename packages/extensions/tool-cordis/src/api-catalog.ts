@@ -1206,6 +1206,42 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     ],
   },
   {
+    key: 'memory',
+    summary: 'The persistent-memory service.',
+    description: 'The persistent-memory service. Registered as `ctx.memory` (one instance per context). The active provider is always the most recently registered and not-yet-disposed one.',
+    methods: [
+      {
+        signature: 'registerMemoryProvider(provider: MemoryProvider): () => void',
+        description: 'Register a provider, replacing any currently active one. Returns a disposer that removes exactly this registration; disposing makes the previously displaced provider (if any) active again.',
+        parameters: [{ name: 'provider', description: 'the provider implementation; its `id` is diagnostic only here.' }],
+        returns: 'the disposer that unregisters this provider.',
+      },
+      {
+        signature: 'async add(request: MemoryAddRequest): Promise<MemoryHit>',
+        description: 'Store one memory through the active provider.',
+        parameters: [{ name: 'request', description: 'scope and content.' }],
+        returns: 'the stored record.',
+      },
+      {
+        signature: 'async search(request: MemorySearchRequest): Promise<MemoryHit[]>',
+        description: 'Search one scope through the active provider.',
+        parameters: [{ name: 'request', description: 'scope, query, and optional limit.' }],
+        returns: 'matching hits.',
+      },
+      {
+        signature: 'async remove(id: string): Promise<void>',
+        description: 'Remove one stored memory through the active provider.',
+        parameters: [{ name: 'id', description: 'a previously returned `MemoryHit.id`.' }],
+      },
+      {
+        signature: 'async profile(): Promise<string>',
+        description: 'Fetch the user-level profile summary through the active provider.',
+        parameters: [],
+        returns: 'the profile text, or `\'\'` when nothing is stored.',
+      },
+    ],
+  },
+  {
     key: 'messageFeedback',
     summary: 'Storage-domain sidecar service.',
     description: 'Storage-domain sidecar service. It inspects persisted Session history and never creates or resumes an Agent or Session.',
@@ -4392,6 +4428,26 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface ManualCompactAgentContext extends CompactionAgentContext {\n    runMaintenance<T>(task: (signal: AbortSignal) => Promise<T>): Promise<T>;\n}',
   },
   {
+    name: 'MemoryAddRequest',
+    declaration: 'export interface MemoryAddRequest {\n    readonly scope: MemoryScope;\n    readonly content: string;\n}',
+  },
+  {
+    name: 'MemoryHit',
+    declaration: 'export interface MemoryHit {\n    readonly id: string;\n    readonly content: string;\n}',
+  },
+  {
+    name: 'MemoryProvider',
+    declaration: 'export interface MemoryProvider {\n    readonly id: string;\n    add(request: MemoryAddRequest): Promise<MemoryHit>;\n    search(request: MemorySearchRequest): Promise<MemoryHit[]>;\n    remove(id: string): Promise<void>;\n    profile(): Promise<string>;\n}',
+  },
+  {
+    name: 'MemoryScope',
+    declaration: 'export type MemoryScope = {\n    kind: \'global\';\n} | {\n    kind: \'project\';\n    id: string;\n};',
+  },
+  {
+    name: 'MemorySearchRequest',
+    declaration: 'export interface MemorySearchRequest {\n    readonly scope: MemoryScope;\n    readonly query: string;\n    readonly limit?: number;\n}',
+  },
+  {
     name: 'Message',
     declaration: 'export interface Message {\n    readonly id: MessageId;\n    readonly role: \'system\' | \'user\' | \'assistant\';\n    readonly content: ContentBlock[];\n    readonly source: MessageSource;\n}',
   },
@@ -5549,7 +5605,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SubprocessTerminalHandle',
-    declaration: 'export interface SubprocessTerminalHandle {\n    readonly pid: number;\n    readonly output: Readable;\n    readonly done: Promise<SubprocessOutcome>;\n    write(data: string): Promise<void>;\n    inspectForeground(): Promise<SubprocessTerminalForeground | undefined>;\n    signalForeground(signal: SubprocessTerminalSignal): Promise<number>;\n    terminate(): Promise<void>;\n}',
+    declaration: 'export interface SubprocessTerminalHandle {\n    readonly pid: number;\n    readonly output: Readable;\n    readonly done: Promise<SubprocessOutcome>;\n    write(data: string): Promise<void>;\n    inspectForeground(): Promise<SubprocessTerminalForeground | undefined>;\n    noteSendSettled(): Promise<void>;\n    signalForeground(signal: SubprocessTerminalSignal): Promise<number>;\n    terminate(): Promise<void>;\n}',
   },
   {
     name: 'SubprocessTerminalSignal',

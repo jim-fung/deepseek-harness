@@ -76,6 +76,7 @@ const GROUP_ORDER = [
   'fs',
   'skill',
   'compact',
+  'memory',
   'subagent',
   'tasks',
   'workflow',
@@ -587,6 +588,15 @@ const SERVICE_ROLES: ServiceRole[] = [
     implementations: ['web-search-exa', 'web-search-perplexity', 'web-search-deepseek', 'web-fetch-http'],
     consumers: ['tool-web'],
     note: 'Search and fetch providers register into one ctx.web seam; tool-web owns the stable model-facing names.',
+  },
+  {
+    key: 'memory',
+    pkg: 'memory',
+    title: 'Persistent-memory provider seam',
+    mode: 'seam',
+    implementations: ['memory-supermemory'],
+    consumers: ['tool-memory'],
+    note: 'One active memory provider serves ctx.memory; tool-memory owns the model-facing tools and the recall section.',
   },
   {
     key: 'spillStore',

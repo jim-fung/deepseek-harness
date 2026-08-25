@@ -40,11 +40,11 @@ Persistent memory spans sessions. When the user asks you to remember something, 
 
 同一会话内跨请求的稳定重复前缀；关闭任一工具族或修改此文本会使下一次组装起的复用失效。
 
-### 记忆工具定义
+### 工具 schema
 
 #### 模型看到的内容
 
-三个已注册工具的名称、描述与参数，即上表所概括：`memory_save(content, scope)`、`memory_search(query, scope, limit?)`（`limit` 限定 1–25）与 `memory_forget(id)`。
+模型会看到已生成的 [`memory_save`、`memory_search` 和 `memory_forget` schema](../../../docs/tool-catalog.zh.md#deepseek-aidsh-tool-memory)，即上表所概括：`memory_save(content, scope)`、`memory_search(query, scope, limit?)`（`limit` 限定 1–25）与 `memory_forget(id)`。
 
 #### Token 影响
 

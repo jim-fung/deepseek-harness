@@ -26,6 +26,7 @@ const GROUP_ORDER = [
   'fs',
   'skill',
   'compact',
+  'memory',
   'subagent',
   'web',
   'spill',
