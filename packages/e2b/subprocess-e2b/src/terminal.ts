@@ -316,6 +316,12 @@ export class E2BTerminalHandle implements SubprocessTerminalHandle {
   }
 
   /** @inheritdoc */
+  async noteSendSettled(): Promise<void> {
+    // Teardown re-derives every process group in the remote session at
+    // termination time, so there is no mid-session adoption state to refresh.
+  }
+
+  /** @inheritdoc */
   signalForeground(signal: SubprocessTerminalSignal): Promise<number> {
     return this.trackOperation(async (operationSignal) => {
       const foreground = await this.inspectForegroundOnce(operationSignal)

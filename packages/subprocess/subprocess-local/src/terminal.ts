@@ -83,13 +83,18 @@ export class LocalTerminalHandle implements SubprocessTerminalHandle {
   // Local inspection is synchronous; the seam returns a promise for remote transports.
   // oxlint-disable-next-line typescript/require-await -- Preserve promise rejection semantics at the async provider contract.
   async inspectForeground(): Promise<SubprocessTerminalForeground | undefined> {
-    this.descendants(this.inspector.snapshot())
     const processGroupId = this.inspector.foregroundPgid(this.pid)
     if (processGroupId === undefined) return undefined
     return {
       processGroupId,
       inputWaiting: this.inspector.isStdinWaiting(processGroupId, this.pid),
     }
+  }
+
+  // Local adoption is synchronous; the seam returns a promise for remote transports.
+  // oxlint-disable-next-line typescript/require-await -- Preserve promise rejection semantics at the async provider contract.
+  async noteSendSettled(): Promise<void> {
+    this.descendants(this.inspector.snapshot())
   }
 
   async signalForeground(signal: SubprocessTerminalSignal): Promise<number> {
@@ -157,6 +162,13 @@ export class LocalTerminalHandle implements SubprocessTerminalHandle {
   }
 
   private descendants(observed: ProcessSnapshot): ProcessIdentity[] {
+    // Scan sites: teardown (stopDescendants, forceStopDescendants) and send
+    // settlement (noteSendSettled). Readiness polling must not call this —
+    // every call is a full process-table sweep. Settlement-time adoption is
+    // load-bearing: once the shell exits, a later scan can no longer see
+    // members that already left its tree (a disowned child), so they must be
+    // adopted while the shell lives.
+    //
     // Adopt newly scanned members only while the numeric root pid provably
     // still carries the spawned shell's start identity: after the shell dies,
     // a recycled pid's tree and session must not donate an unrelated

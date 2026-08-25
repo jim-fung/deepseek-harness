@@ -144,20 +144,30 @@ describe('LocalTerminalHandle', () => {
     expect(pty.kills).toEqual([])
   })
 
-  it('uses captured identities and contains shell races when final inspection fails', async () => {
+  it('uses captured identities and contains shell races when final inspection fails', () => {
     const pty = new FakePty()
     const inspector = new FakeInspector()
     const captured = { pid: 124, started: 'captured' }
     inspector.members = [captured]
     inspector.alive.add(pty.pid)
     inspector.alive.add(captured.pid)
+    inspector.removeOnSignal = false
     const handle = new LocalTerminalHandle(pty.asPty(), inspector, 10)
-    await handle.inspectForeground()
+    // The first host-exit pass captures identities while the table still answers.
+    handle.terminateForHostExit()
+    expect(inspector.processes).toContainEqual([captured.pid, 'SIGKILL'])
+
     inspector.readTree = () => { throw new Error('process table unavailable') }
     inspector.throwProcess = true
+    const attempted: Array<[number, 'SIGTERM' | 'SIGKILL']> = []
+    const racing = inspector.signalProcess.bind(inspector)
+    inspector.signalProcess = (identity, signal) => {
+      attempted.push([identity.pid, signal])
+      racing(identity, signal)
+    }
 
     expect(() => { handle.terminateForHostExit() }).not.toThrow()
-    expect(inspector.processes).toEqual([])
+    expect(attempted).toContainEqual([captured.pid, 'SIGKILL'])
     expect(pty.kills).toEqual([])
   })
 
@@ -286,7 +296,31 @@ describe('LocalTerminalHandle', () => {
     expect(inspector.processes).toEqual([[124, 'SIGTERM']])
   })
 
-  it('retains an inspected descendant after it reparents away from the shell', async () => {
+  it('inspects the foreground without sweeping the process table', async () => {
+    const pty = new FakePty()
+    const inspector = new FakeInspector()
+    const descendant = { pid: 124, started: 'observed' }
+    inspector.members = [descendant]
+    inspector.alive.add(descendant.pid)
+    const handle = makeHandle(pty, inspector, 20)
+    let treeReads = 0
+    const readTree = inspector.readTree.bind(inspector)
+    inspector.readTree = () => {
+      treeReads += 1
+      return readTree()
+    }
+
+    expect(await handle.inspectForeground()).toEqual({ processGroupId: 456, inputWaiting: false })
+    expect(await handle.inspectForeground()).toEqual({ processGroupId: 456, inputWaiting: false })
+    // Readiness polls resolve the foreground group only; descendant adoption
+    // happens at send settlement and teardown, where one scan replaces one per poll.
+    expect(treeReads).toBe(0)
+
+    await handle.terminate()
+    expect(treeReads).toBeGreaterThan(0)
+  })
+
+  it('adopts at send settlement a descendant that later reparents away', async () => {
     const pty = new FakePty()
     const inspector = new FakeInspector()
     const descendant = { pid: 124, started: 'observed' }
@@ -294,7 +328,7 @@ describe('LocalTerminalHandle', () => {
     inspector.alive.add(descendant.pid)
     const handle = makeHandle(pty, inspector, 20)
 
-    await handle.inspectForeground()
+    await handle.noteSendSettled()
     inspector.members = []
     pty.emitExit()
 
@@ -600,19 +634,26 @@ describe('process-table read amplification', () => {
     return `${rows.join('\n')}\n`
   }
 
-  async function tableReadsForOnePoll(descendants: number): Promise<number> {
+  async function tableReadsForOperation(
+    descendants: number,
+    operation: (handle: LocalTerminalHandle) => Promise<void>,
+  ): Promise<number> {
     const { internals, tableReads } = darwinInternals(shellTable(descendants))
     const inspector = createProcessInspector('darwin', 'arm64', internals)
     const handle = new LocalTerminalHandle(new FakePty().asPty(), inspector, 10, 'darwin')
     tableReads.length = 0
-    const foreground = await handle.inspectForeground()
-    expect(foreground).toEqual({ processGroupId: 456, inputWaiting: false })
+    await operation(handle)
     return tableReads.length
   }
 
-  it('reads the macOS process table once per foreground inspection regardless of descendant count', async () => {
-    expect(await tableReadsForOnePoll(0)).toBe(1)
-    expect(await tableReadsForOnePoll(2)).toBe(1)
-    expect(await tableReadsForOnePoll(10)).toBe(1)
+  const pollForeground = async (handle: LocalTerminalHandle): Promise<void> => {
+    expect(await handle.inspectForeground()).toEqual({ processGroupId: 456, inputWaiting: false })
+  }
+
+  it('reads the macOS process table once per settled send and never per readiness poll', async () => {
+    for (const count of [0, 2, 10]) {
+      expect(await tableReadsForOperation(count, pollForeground)).toBe(0)
+      expect(await tableReadsForOperation(count, (handle) => handle.noteSendSettled())).toBe(1)
+    }
   })
 })

@@ -256,6 +256,18 @@ export interface SubprocessTerminalHandle {
    */
   inspectForeground(): Promise<SubprocessTerminalForeground | undefined>
   /**
+   * Report that one send settled: the shell regained its prompt, output went
+   * idle, or an absolute bound fired. Providers that adopt terminal-session
+   * members by process-table scanning — so later teardown can still clean
+   * members that leave the tree before the shell exits, such as a disowned
+   * child observed before its parent's death — re-observe exactly here: once
+   * per send, because readiness polling performs no process-table sweeps.
+   * Providers whose teardown re-derives every session member at termination
+   * time make this a no-op.
+   * @returns Resolves after the re-observation; a failure must never undo the settled send.
+   */
+  noteSendSettled(): Promise<void>
+  /**
    * Deliver a signal to the current foreground process group.
    * @param signal - permitted terminal signal.
    * @returns the exact group id that received it.
