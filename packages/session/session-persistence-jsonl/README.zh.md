@@ -86,7 +86,7 @@ kind: "package-reference"
 
 ### 设计理念
 
-该后端是共享 [PersistenceCoordinator](../session-persistence/README.zh.md#understand-the-implementation) 之上的一层薄存储：它加载已存储记录、追加批次、提交修复，并把生命周期编排委托给协调器。其物理身份是文件修订值：device、inode、size 与纳秒时间戳标识一份日志，并在追加或修复后改变，这正是 `listSnapshots` 与保留准备结果校验所使用的身份。
+该后端是共享 [PersistenceCoordinator](../session-persistence/README.zh.md#understand-the-implementation) 之上的一层薄存储：它加载已存储记录、追加批次、提交修复，并把生命周期编排委托给协调器。其物理身份是文件修订值：device、inode、size 与纳秒时间戳标识一份日志，并在追加或修复后改变，这正是 `listSnapshots` 与保留准备结果校验所使用的身份。`readStoredRevision` 接受一个可选的咨询性 cwd 提示：协调器传入存储 header 自身的 cwd，后端因此能用一次 stat 探测确定性的 `root/cwd/id` 路径，而不必扫描每个项目目录；提示未命中（cwd 错误或已移动）时回退为全量扫描，正确性绝不依赖该提示。
 
 ### 物理编码
 

@@ -468,6 +468,43 @@ describe('JsonlSessionPersistence: durability and crash semantics', () => {
     await expect(persistence.readStoredRevision(m.id, controller.signal)).rejects.toBe(reason)
   })
 
+  it('answers a hinted revision read from the deterministic path without scanning', async () => {
+    const m = meta('hinted-revision', '/work')
+    await ctx.sessionPersistence.create(m)
+    await ctx.sessionPersistence.append(m.id, oneTurnLog())
+    // A second project directory holds a DIFFERENT session; a scan would probe it.
+    const other = meta('hinted-revision-other', '/elsewhere')
+    await ctx.sessionPersistence.create(other)
+    await ctx.sessionPersistence.append(other.id, oneTurnLog())
+    const persistence = ctx.sessionPersistence as JsonlSessionPersistence
+    const internals = persistence as unknown as {
+      findLog(id: SessionId, signal?: AbortSignal): Promise<string | undefined>
+    }
+    const findLog = vi.spyOn(internals, 'findLog')
+
+    const hinted = await persistence.readStoredRevision(m.id, undefined, { cwd: '/work' })
+    expect(findLog).not.toHaveBeenCalled()
+    // Identical value to the scanning read the hint replaces.
+    expect(hinted).toBe(await persistence.readStoredRevision(m.id))
+  })
+
+  it('falls back to the full scan when the hinted cwd misses', async () => {
+    const m = meta('hint-miss', '/work')
+    await ctx.sessionPersistence.create(m)
+    await ctx.sessionPersistence.append(m.id, oneTurnLog())
+    const persistence = ctx.sessionPersistence as JsonlSessionPersistence
+    const internals = persistence as unknown as {
+      findLog(id: SessionId, signal?: AbortSignal): Promise<string | undefined>
+    }
+    const findLog = vi.spyOn(internals, 'findLog')
+
+    // Wrong cwd (e.g. the project moved): the hinted path is absent, so the
+    // scan must still resolve the artifact under its actual project directory.
+    const missed = await persistence.readStoredRevision(m.id, undefined, { cwd: '/moved' })
+    expect(findLog).toHaveBeenCalledTimes(1)
+    expect(missed).toBe(await persistence.readStoredRevision(m.id))
+  })
+
   it('omits a snapshot artifact removed after discovery', async () => {
     const m = meta('vanishing-snapshot')
     await ctx.sessionPersistence.create(m)

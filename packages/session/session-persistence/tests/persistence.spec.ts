@@ -6,7 +6,8 @@ import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import {
   DEFAULT_PREPARED_SESSION_CACHE_SIZE, DEFAULT_WRITE_BATCH_MAX_DELAY_MS, MAX_WRITE_BATCH_DELAY_MS,
   SessionPersistence, SessionPersistenceRevision, PersistenceCoordinator,
-  type PersistenceBackend, type SessionPersistenceSnapshot, type StoredPrefix, type StoredSuffix,
+  type PersistenceBackend, type SessionPersistenceSnapshot, type StoredPrefix,
+  type StoredRevisionHint, type StoredSuffix,
 } from '../src/index.ts'
 import { runPersistenceContract, meta, oneTurnLog } from './contract.ts'
 import { runCoordinatorContract, type CoordinatorFixture } from './coordinator-contract.ts'
@@ -220,8 +221,16 @@ class ControlledBackend implements PersistenceBackend<never> {
     }
   }
 
-  async readStoredRevision(id: SessionId, signal?: AbortSignal): Promise<SessionPersistenceRevision | undefined> {
+  /** Location hints received by readStoredRevision, in call order. */
+  readonly revisionHints: Array<StoredRevisionHint | undefined> = []
+
+  async readStoredRevision(
+    id: SessionId,
+    signal?: AbortSignal,
+    hint?: StoredRevisionHint,
+  ): Promise<SessionPersistenceRevision | undefined> {
     signal?.throwIfAborted()
+    this.revisionHints.push(hint)
     const entry = this.store.get(id)
     return entry === undefined ? undefined : memoryRevision(entry)
   }
@@ -967,6 +976,30 @@ describe('PersistenceCoordinator session preparations', () => {
       expect(backend.loadAttempts).toBe(2)
       expect(backend.appendAttempts).toBe(1)
       expect(backend.store.get(id)?.events).toHaveLength(oneTurnLog().length + 1)
+    } finally {
+      await fiber.dispose()
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('probes preparation freshness with the stored cwd as a location hint', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    const backend = new ControlledBackend()
+    const id = SessionId('freshness-cwd-hint')
+    backend.store.set(id, { meta: meta(id, '/work'), events: oneTurnLog() })
+    let coordinator!: PersistenceCoordinator<never>
+    const fiber = await ctx.plugin(Object.assign((inner: Context) => {
+      coordinator = new PersistenceCoordinator(inner, backend)
+    }, { inject: ['sessions'] }))
+
+    try {
+      // load commits through commitPrepared; inspect re-checks the retained
+      // source — both freshness probes must hint the stored header's cwd.
+      await coordinator.load(id)
+      await coordinator.inspect(id)
+      expect(backend.revisionHints.length).toBeGreaterThanOrEqual(2)
+      expect(backend.revisionHints.every(hint => hint?.cwd === '/work')).toBe(true)
     } finally {
       await fiber.dispose()
       await ctx.fiber.dispose()

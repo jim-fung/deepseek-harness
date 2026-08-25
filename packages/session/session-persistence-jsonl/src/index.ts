@@ -21,7 +21,7 @@ import {
   type PersistenceBackend, type SessionLocation, type SessionPersistenceSnapshot,
   type SessionInspection,
   type SessionPersistenceRevision as PersistenceRevision, type SessionRawArtifact,
-  type StoredPrefix,
+  type StoredPrefix, type StoredRevisionHint,
 } from '@deepseek-ai/dsh-session-persistence'
 import type { Session, SessionEvent, SessionId, SessionHeader, SessionPreparation } from '@deepseek-ai/dsh-session'
 import {
@@ -226,15 +226,31 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
   }
 
   /**
-   * Read one log's stat-derived revision without loading its event bytes.
-   * Resolving an id with unknown cwd still scans the project directories.
+   * Read one log's stat-derived revision without loading its event bytes. An
+   * advisory cwd hint answers from the deterministic log path (root, cwd, id)
+   * with one stat; without a hint — or after a hinted miss, e.g. a wrong or
+   * moved cwd — resolving the id still scans the project directories, so
+   * cross-cwd discovery is unchanged.
    */
-  async readStoredRevision(id: SessionId, signal?: AbortSignal): Promise<PersistenceRevision | undefined> {
+  async readStoredRevision(
+    id: SessionId,
+    signal?: AbortSignal,
+    hint?: StoredRevisionHint,
+  ): Promise<PersistenceRevision | undefined> {
     signal?.throwIfAborted()
     await this.ensureRootEncoding()
     signal?.throwIfAborted()
+    if (hint !== undefined) {
+      const hinted = await this.statRevision(logPath(this.root, hint.cwd, id, this.compression), signal)
+      if (hinted !== undefined) return hinted
+    }
     const path = await this.findLog(id, signal)
     if (path === undefined) return undefined
+    return this.statRevision(path, signal)
+  }
+
+  /** Stat one log path into its source-qualified revision, treating ENOENT as absence. */
+  private async statRevision(path: string, signal?: AbortSignal): Promise<PersistenceRevision | undefined> {
     try {
       const identity = await stat(path, { bigint: true })
       signal?.throwIfAborted()

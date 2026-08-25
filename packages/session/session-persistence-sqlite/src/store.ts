@@ -20,6 +20,7 @@ import {
   type SessionPersistenceRevision as PersistenceRevision,
   type SessionPersistenceSnapshot,
   type StoredPrefix,
+  type StoredRevisionHint,
   type StoredSuffix,
 } from '@deepseek-ai/dsh-session-persistence'
 import {
@@ -150,7 +151,16 @@ export class SqliteStore implements PersistenceBackend<number> {
     }
   }
 
-  async readStoredRevision(id: SessionId, signal?: AbortSignal): Promise<PersistenceRevision | undefined> {
+  /**
+   * Read the stored revision by direct row lookup. The advisory cwd hint is
+   * unused: one database keys sessions by id alone, so no location resolution
+   * exists to optimize.
+   */
+  async readStoredRevision(
+    id: SessionId,
+    signal?: AbortSignal,
+    _hint?: StoredRevisionHint,
+  ): Promise<PersistenceRevision | undefined> {
     await this.observe(signal)
     const row = this.rowFor(id)
     signal?.throwIfAborted()

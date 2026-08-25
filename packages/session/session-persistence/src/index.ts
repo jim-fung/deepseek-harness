@@ -75,6 +75,7 @@ export type {
   PersistenceBackend,
   PersistenceCoordinatorOptions,
   StoredPrefix,
+  StoredRevisionHint,
   StoredSuffix,
 } from './coordinator.ts'
 

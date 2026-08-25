@@ -86,7 +86,7 @@ This section explains the physical encoding and write path; the observable contr
 
 ### Design concept
 
-The backend is a thin storage layer over the shared [PersistenceCoordinator](../session-persistence/README.md#understand-the-implementation): it loads stored records, appends batches, commits repairs, and delegates lifecycle orchestration to the coordinator. Its physical identity is a file revision: device, inode, size, and nanosecond timestamps identify one log and change after append or repair, which is what `listSnapshots` and retained-preparation validation use.
+The backend is a thin storage layer over the shared [PersistenceCoordinator](../session-persistence/README.md#understand-the-implementation): it loads stored records, appends batches, commits repairs, and delegates lifecycle orchestration to the coordinator. Its physical identity is a file revision: device, inode, size, and nanosecond timestamps identify one log and change after append or repair, which is what `listSnapshots` and retained-preparation validation use. `readStoredRevision` accepts an optional advisory cwd hint: the coordinator passes the stored header's own cwd, so the backend stats the deterministic `root/cwd/id` path with one probe instead of scanning every project directory; a hinted miss (wrong or moved cwd) falls back to the full scan, and correctness never depends on the hint.
 
 ### Physical encoding
 
