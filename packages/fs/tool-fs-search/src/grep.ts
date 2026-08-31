@@ -265,6 +265,44 @@ export function presentGrepResult(
 }
 
 /**
+ * Cached {@link retainGrepMatches} over one canonical value's matches.
+ *
+ * Package-internal: the only callers are the `grep` `output.render` and
+ * `output.presentationMeta` projections and the `tools/post-execute` spill
+ * listener, and all three receive the SAME value — the tool registry
+ * deep-freezes the value once and calls render then `presentationMeta` with
+ * that one object, and the post-execute listener reads `result.value`, the same
+ * frozen result. Memoizing on the frozen `matches` array collapses those
+ * up-to-three retention passes into one. Keeping this unexported means no
+ * caller can feed a mutable array whose later mutation would diverge from the
+ * cached outcome, and no consumer can mutate the shared
+ * {@link RetainedItems} (all consumers only read it).
+ *
+ * @param matches - every match the search parsed (the frozen value's matches).
+ * @param caps - the deployment's resolved grep caps; the two retention caps
+ *   key the memo.
+ * @returns the retention outcome over the previewed matches.
+ */
+function retainedGrepMatches(matches: GrepMatch[], caps: GrepToolCaps): RetainedItems<GrepMatch> {
+  const capKey = `${caps.maxMatches}:${caps.maxLineBytes}`
+  const byCap = retainCache.get(matches) ?? new Map<string, RetainedItems<GrepMatch>>()
+  const cached = byCap.get(capKey)
+  if (cached !== undefined) return cached
+  const computed = retainGrepMatches(matches, caps.maxMatches, caps.maxLineBytes)
+  byCap.set(capKey, computed)
+  retainCache.set(matches, byCap)
+  return computed
+}
+
+/**
+ * Per-matches memo for {@link retainedGrepMatches}, keyed first on the frozen
+ * `matches` array so a garbage-collected result drops its entry, then on the
+ * retention cap pair (deployment constants per registration; both are positive
+ * integers, so the `maxMatches`:`maxLineBytes` composite key is unambiguous).
+ */
+const retainCache = new WeakMap<GrepMatch[], Map<string, RetainedItems<GrepMatch>>>()
+
+/**
  * Register the `grep` tool and its system-prompt guidance.
  *
  * @param ctx - the plugin context; registrations are effects scoped to it, and
@@ -311,10 +349,10 @@ export function applyGrepTool(ctx: Context, caps: GrepToolCaps): void {
       },
       render: (_args, value) => [{
         type: 'text',
-        text: formatRetainedGrep(retainGrepMatches(value.matches, caps.maxMatches, caps.maxLineBytes)),
+        text: formatRetainedGrep(retainedGrepMatches(value.matches, caps)),
       }],
       presentationMeta: (_args, value) =>
-        grepSearchMeta(retainGrepMatches(value.matches, caps.maxMatches, caps.maxLineBytes), caps.maxMetaBytes),
+        grepSearchMeta(retainedGrepMatches(value.matches, caps), caps.maxMetaBytes),
     },
     async execute(args, exec) {
       const input = parseGrepArgs(args)
@@ -356,7 +394,7 @@ export function applyGrepTool(ctx: Context, caps: GrepToolCaps): void {
       kind: 'accept',
       content: [{
         type: 'text',
-        text: formatRetainedGrep(retainGrepMatches(matches, caps.maxMatches, caps.maxLineBytes), spillRef),
+        text: formatRetainedGrep(retainedGrepMatches(matches, caps), spillRef),
       }],
       ...decision.additionalContexts !== undefined ? { additionalContexts: decision.additionalContexts } : {},
     }

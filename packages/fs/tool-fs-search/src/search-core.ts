@@ -335,11 +335,15 @@ export function previewLine(line: string, maxBytes: number): string {
  * @param matches - every match the search parsed (the canonical value's matches).
  * @param maxMatches - the inline match cap (the `grepMaxMatches` config).
  * @param maxLineBytes - the per-matched-line preview budget in bytes.
- * @returns the retention outcome over the previewed matches.
+ * @returns the retention outcome over the previewed matches. Only the first
+ * `maxMatches` matches are previewed: the head retainer counts and drops every
+ * later match without reading it, so its preview cannot reach the outcome.
  */
 export function retainGrepMatches(matches: GrepMatch[], maxMatches: number, maxLineBytes: number): RetainedItems<GrepMatch> {
   const retainer = new ItemRetainer<GrepMatch>({ kind: 'head', maxItems: maxMatches })
-  for (const match of matches) retainer.push({ ...match, line: previewLine(match.line, maxLineBytes) })
+  for (const [index, match] of matches.entries()) {
+    retainer.push(index < maxMatches ? { ...match, line: previewLine(match.line, maxLineBytes) } : match)
+  }
   return retainer.finish()
 }
 
