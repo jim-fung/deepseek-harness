@@ -191,6 +191,7 @@ describe('LocalSubprocessRuntime', () => {
       done: Promise.resolve({ exitCode: 0, signal: null }),
       write: async () => {},
       inspectForeground: async () => undefined,
+      noteSendSettled: async () => {},
       signalForeground: async () => 1,
       terminate,
     }
@@ -215,6 +216,7 @@ describe('LocalSubprocessRuntime', () => {
       done: Promise.resolve({ exitCode: 0, signal: null }),
       write: async () => {},
       inspectForeground: async () => undefined,
+      noteSendSettled: async () => {},
       signalForeground: async () => 1,
       terminate: vi.fn(async () => { throw firstFailure }),
     }
@@ -262,6 +264,7 @@ describe('LocalSubprocessRuntime', () => {
       done: Promise.resolve({ exitCode: 0, signal: null }),
       write: async () => {},
       inspectForeground: async () => undefined,
+      noteSendSettled: async () => {},
       signalForeground: async () => 1,
       terminate: vi.fn(async () => { throw failure }),
     }
