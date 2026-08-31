@@ -363,37 +363,49 @@ describe('tool-bash-persistent', () => {
     const session = stub.sessions[0]!
 
     session.mode = 'idle-then-normal'
-    expect(text(await call(ctx, owner, 'silent then complete'))).toContain('hello from')
+    const silentThenComplete = text(await call(ctx, owner, 'silent then complete'))
+    expect(silentThenComplete.startsWith('hello')).toBe(true)
+    expect(silentThenComplete).toContain('5 characters were omitted from the middle')
+    expect(silentThenComplete.endsWith(' stub')).toBe(true)
 
     session.mode = 'incremental-fallback'
     session.scrollback = ''
-    expect(text(await call(ctx, owner, 'incremental fallback'))).toContain('increment')
+    const incrementalFallback = text(await call(ctx, owner, 'incremental fallback'))
+    expect(incrementalFallback.startsWith('incre')).toBe(true)
+    expect(incrementalFallback).toContain('<response clipped>')
 
     session.mode = 'prompt-only'
     const promptFallback = text(await call(ctx, owner, 'bad {'))
-    expect(promptFallback).toContain('bash: synt')
+    expect(promptFallback).toContain('bash:')
+    expect(promptFallback).toContain('15 characters were omitted from the middle')
 
     session.mode = 'prompt-crlf'
     session.scrollback = ''
     const crlfPromptFallback = text(await call(ctx, owner, 'bad {'))
-    expect(crlfPromptFallback).toContain('bash: synt')
+    expect(crlfPromptFallback).toContain('bash:')
+    expect(crlfPromptFallback).toContain('16 characters were omitted from the middle')
 
     session.mode = 'end-only'
     session.scrollback = ''
     const missingStart = text(await call(ctx, owner, 'recover marker'))
-    expect(missingStart).toContain('recovered')
+    expect(missingStart).toContain('recov')
+    expect(missingStart.endsWith('utput')).toBe(true)
     expect(missingStart).toContain('beginning of this command output was dropped')
     expect(missingStart).toContain('<response clipped>')
 
     session.mode = 'large'
-    expect(text(await call(ctx, owner, 'large'))).toContain('<response clipped>')
+    const large = text(await call(ctx, owner, 'large'))
+    expect(large.startsWith('xxxxx')).toBe(true)
+    expect(large.endsWith('xxxxx')).toBe(true)
+    expect(large).toContain('90 characters were omitted from the middle')
 
     session.mode = 'nonzero'
     expect(text(await call(ctx, owner, 'false'))).toBe('[exit code: 7]')
 
     session.mode = 'exit'
     const exited = text(await call(ctx, owner, 'exit'))
-    expect(exited).toContain('hello from')
+    expect(exited).toContain('hello')
+    expect(exited).toContain(' stub')
     expect(exited).toContain('[shell exited: code 9]')
     expect(exited).not.toContain('[exit code: 9]')
     expect(exited).toContain('next bash call starts from the workspace')
@@ -503,10 +515,13 @@ describe('tool-bash-persistent', () => {
       () => ({ delta: 'TAIL', viewport: 'stub> ', reason: 'stdin_read' }),
     ]
     const result = text(await call(ctx, owner, 'stream within window'))
-    // Uncapped reference: the whole post-marker stream, clipped to maxOutputChars;
-    // pre-marker output is not part of marker-anchored recovery.
+    // Uncapped reference: the whole post-marker stream, clipped to a head and
+    // tail of maxOutputChars; pre-marker output is not part of marker-anchored
+    // recovery.
     const reference = `HEAD\n${'x'.repeat(30_000)}TAIL`
-    expect(result.startsWith(reference.slice(0, 1_000))).toBe(true)
+    expect(result.startsWith(reference.slice(0, 500))).toBe(true)
+    expect(result.endsWith(reference.slice(-500))).toBe(true)
+    expect(result).toContain('29009 characters were omitted from the middle')
     expect(result).not.toContain('PRE')
     expect(result).toContain('<response clipped>')
     expect(result).not.toContain('beginning of this command output was dropped')
@@ -525,11 +540,13 @@ describe('tool-bash-persistent', () => {
     const result = text(await call(ctx, owner, 'stream past window'))
     // Uncapped accumulation would settle this stream (marker recovered, no end
     // marker in it), so the cap is observable as the incomplete verdict; the
-    // recovered output still starts at command start and the post-freeze
-    // delta is dropped instead of accumulating for the command's lifetime.
+    // recovered output still starts at command start — now as a head and tail —
+    // and the post-freeze delta is dropped instead of accumulating for the
+    // command's lifetime.
     expect(result).toContain('beginning of this command output was dropped')
-    expect(result).toContain('<response clipped>')
-    expect(result).toContain(`HEAD\n${'x'.repeat(995)}`)
+    expect(result).toContain('<response clipped><NOTE>To save on context, 64535 characters were omitted')
+    expect(result).toContain(`HEAD\n${'x'.repeat(495)}`)
+    expect(result.endsWith('x'.repeat(500))).toBe(true)
     expect(result).not.toContain('AFTER-FREEZE')
   })
 

@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-08-31-persistent-shell-head-tail-clip.md
+2026-08-31-persistent-shell-head-tail-clip.md: 3a53af6f12af7ef9641b81601980650bcc8b4174
+2026-08-31-persistent-shell-head-tail-clip.zh.md: bdf4548266522402e4b0d78aaddeb392fe20d0e7

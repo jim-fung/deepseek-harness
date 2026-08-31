@@ -11,8 +11,6 @@ import type { TerminalReadResult, TerminalSessionId } from '@deepseek-ai/dsh-ter
 import { deadline, timeoutOf } from '@deepseek-ai/dsh-timeout'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
-// TODO: Replace the file-search advice; arbitrary command output need not come from a searchable file.
-const TRUNCATED_MESSAGE = '<response clipped><NOTE>To save on context only part of this file has been shown to you. You should retry this tool after you have searched inside the file with `grep -n` in order to find the line numbers of what you are looking for.</NOTE>'
 const LOST_PREFIX_MESSAGE = '<response clipped><NOTE>The beginning of this command output was dropped by the terminal scrollback limit. The following text is the earliest retained output.</NOTE>\n'
 const SHELL_RESET_MESSAGE = 'The persistent bash shell was reset; the next bash call starts from the workspace with a fresh current directory and environment.'
 const TIMEOUT_CODE = 'PERSISTENT_BASH_TIMEOUT'
@@ -56,11 +54,25 @@ interface PersistentShells {
   reset(owner: Agent, reason: string): Promise<void>
 }
 
-function maybeTruncate(content: string, maxOutputChars: number, incomplete = false): string {
-  if (content.length <= maxOutputChars && !incomplete) return content
-  return content.length <= maxOutputChars
-    ? content + TRUNCATED_MESSAGE
-    : content.slice(0, maxOutputChars) + TRUNCATED_MESSAGE
+/** The notice placed at the gap where the budget clip dropped a command's middle. */
+function clippedNotice(omittedChars: number): string {
+  return `<response clipped><NOTE>To save on context, ${omittedChars} characters were omitted from the middle of this command output; the beginning and end are shown. Re-run the command with output redirected to a file and search that file with \`grep -n\` to see the omitted part.</NOTE>\n`
+}
+
+/**
+ * Bound one command's output to `maxOutputChars`. The budget splits into equal
+ * head and tail halves so error and exit summaries at the end survive; the
+ * notice sits in the gap and names the exact number of omitted characters.
+ * A start lost to the scrollback limit is {@link LOST_PREFIX_MESSAGE}'s fact,
+ * reported by the caller, not a budget omission.
+ */
+function maybeTruncate(content: string, maxOutputChars: number): string {
+  if (content.length <= maxOutputChars) return content
+  const headChars = Math.ceil(maxOutputChars / 2)
+  const tailChars = Math.floor(maxOutputChars / 2)
+  return content.slice(0, headChars)
+    + clippedNotice(content.length - headChars - tailChars)
+    + content.slice(content.length - tailChars)
 }
 
 function markers(): CommandMarkers {
@@ -163,7 +175,7 @@ function retainedScrollback(
 }
 
 function renderCaptured(output: CapturedOutput, maxOutputChars: number): string {
-  const rendered = maybeTruncate(output.text, maxOutputChars, output.incomplete)
+  const rendered = maybeTruncate(output.text, maxOutputChars)
   const withPrefix = output.incomplete && output.text.length > 0
     ? LOST_PREFIX_MESSAGE + rendered
     : rendered
