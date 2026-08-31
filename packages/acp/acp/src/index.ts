@@ -47,7 +47,7 @@ import {
 } from '@agentclientprotocol/sdk'
 import type { ModelSelection } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
-import type {} from '@deepseek-ai/dsh-session-persistence'
+import { SessionPersistenceNotFoundError } from '@deepseek-ai/dsh-session-persistence'
 // Side-effect type import: declaration-merges the approval waterfall answered below.
 import type {} from '@deepseek-ai/dsh-user-approval'
 import { supportsAcpImagePrompts } from './content.ts'
@@ -244,7 +244,17 @@ export function apply(ctx: Context, config: AcpConfig): void {
       }
       activating.add(sessionId)
       return (async (): Promise<ResumeSessionResponse> => {
-        const persisted = (await persistence.list(signal)).find(header => header.id === sessionId)
+        // Probe the known id directly so one resume costs O(this session), not
+        // O(every stored session) the way a full store listing would. A corrupt
+        // or format-unsupported target log rejects here instead of masquerading
+        // as an absent session.
+        const persisted = await persistence.inspect(sessionId, signal).then(
+          inspection => inspection.meta,
+          (error: unknown) => {
+            if (error instanceof SessionPersistenceNotFoundError) return undefined
+            throw error
+          },
+        )
         if (persisted === undefined || persisted.origin === 'subagent' || persisted.parentSession !== undefined) {
           throw invalidParams(`session is not resumable: ${sessionId}`)
         }

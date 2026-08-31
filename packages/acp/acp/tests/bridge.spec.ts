@@ -286,6 +286,30 @@ describe('automation-only ACP bridge', () => {
     expect(harness.ctx.agents.list()).toHaveLength(0)
   })
 
+  it('probes the resumed id directly without enumerating the store', async () => {
+    harness = await makeBridgeHarness({ script: [textResponse('first'), textResponse('second')] })
+    await harness.client.initialize({ protocolVersion: PROTOCOL_VERSION, clientCapabilities: {} })
+    const sessions: string[] = []
+    for (const text of ['first', 'second']) {
+      const created = await harness.client.newSession({ cwd: process.cwd(), mcpServers: [] })
+      sessions.push(created.sessionId)
+      await harness.client.prompt({ sessionId: created.sessionId, prompt: [{ type: 'text', text }] })
+      await harness.client.closeSession({ sessionId: created.sessionId })
+    }
+
+    const list = vi.spyOn(harness.ctx.sessionPersistence, 'list')
+    const inspect = vi.spyOn(harness.ctx.sessionPersistence, 'inspect')
+
+    await expect(harness.client.resumeSession({ sessionId: sessions[0]!, cwd: process.cwd() }))
+      .resolves.toHaveProperty('configOptions')
+
+    expect(list).not.toHaveBeenCalled()
+    expect(inspect).toHaveBeenCalledTimes(1)
+    expect(inspect).toHaveBeenCalledWith(SessionId(sessions[0]!), expect.anything())
+    list.mockRestore()
+    inspect.mockRestore()
+  })
+
   it('restores the deployment selection when persisted events have no request header', async () => {
     harness = await makeBridgeHarness()
     await harness.client.initialize({ protocolVersion: PROTOCOL_VERSION, clientCapabilities: {} })
@@ -372,6 +396,12 @@ describe('automation-only ACP bridge', () => {
       { version: 0, id: SessionId('valid-b'), createdAt: 3, cwd: '/missing/filter' },
       { version: 0, id: SessionId('valid-a'), createdAt: 3, cwd: '/missing/filter' },
     ])
+    // Resume probes the known id instead of reading the listing above, so the
+    // header-less-cwd entry needs its own direct inspection.
+    vi.spyOn(persistence, 'inspect').mockImplementation(async (id: SessionId) => ({
+      meta: { version: 0, id, createdAt: 6 },
+      events: [],
+    }))
 
     await expect(harness.client.listSessions({ cwd: 'relative' })).rejects.toThrow(/absolute path/)
     await expect(harness.client.listSessions({ cwd: '/missing/filter' })).resolves.toEqual({

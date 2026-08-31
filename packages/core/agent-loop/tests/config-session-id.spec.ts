@@ -135,6 +135,46 @@ describe('config-driven session id', () => {
     await ctx.fiber.dispose()
   })
 
+  it('creates fresh only for an absent artifact; a present one rethrows its load failure', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-cfg-exact-fallback-'))
+    dirs.push(root)
+
+    // First use of the exact id: no stored artifact exists, so startup creates
+    // the session fresh and reports no config-start failure.
+    const ctx1 = await makeCoreContext()
+    await ctx1.plugin(JsonlSessionPersistence, { root })
+    ctx1.llm.registerAdapter(['mock'], new MockAdapter([textResponse('seed')]))
+    const firstFailures: unknown[] = []
+    ctx1.on('agent-loop/config-start-failed', ({ error }) => { firstFailures.push(error) })
+    await ctx1.plugin(AgentLoop, {
+      agents: [{ id: 'main', sessionId: SessionId('config-exact-fallback'), provider: 'mock', model: 'mock' }],
+    })
+    await expect.poll(() => ctx1.agents.get(SessionId('config-exact-fallback'))).toBeDefined()
+    const first = ctx1.agents.get(SessionId('config-exact-fallback'))!
+    first.followup(createUserMessage({ content: [{ type: 'text', text: 'persist' }], source: { kind: 'user' } }))
+    await waitForIdle(ctx1, first)
+    await ctx1.sessions.flush(first.session)
+    await ctx1.fiber.dispose()
+    expect(firstFailures).toEqual([])
+
+    // Remount over the now-present artifact with a failing load: the failure is
+    // reported, and no fresh session silently takes over the exact id.
+    const ctx2 = await makeCoreContext()
+    await ctx2.plugin(JsonlSessionPersistence, { root })
+    const loadFailure = new Error('simulated load failure')
+    vi.spyOn(ctx2.sessionPersistence, 'prepare').mockRejectedValue(loadFailure)
+    const secondFailures: unknown[] = []
+    ctx2.on('agent-loop/config-start-failed', ({ error }) => { secondFailures.push(error) })
+    const warn = vi.spyOn(ctx2.logger, 'warn').mockImplementation(() => undefined)
+    await ctx2.plugin(AgentLoop, {
+      agents: [{ id: 'main', sessionId: SessionId('config-exact-fallback'), provider: 'mock', model: 'mock' }],
+    })
+    await expect.poll(() => secondFailures).toEqual([loadFailure])
+    expect(ctx2.agents.get(SessionId('config-exact-fallback'))).toBeUndefined()
+    warn.mockRestore()
+    await ctx2.fiber.dispose()
+  })
+
   it('waits for a draining exact-id lifecycle during an overlapping reload', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-cfg-exact-overlap-'))
     dirs.push(root)
@@ -231,7 +271,7 @@ describe('config-driven session id', () => {
     ctx.on('agent-loop/config-start-failed', ({ sessionId, error }) => {
       failures.push({ sessionId, error })
     })
-    vi.spyOn(ctx.sessionPersistence, 'list').mockRejectedValue(failure)
+    vi.spyOn(ctx.sessionPersistence, 'inspect').mockRejectedValue(failure)
     const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => undefined)
 
     await ctx.plugin(AgentLoop, {
@@ -269,7 +309,7 @@ describe('config-driven session id', () => {
     // oxlint-disable-next-line typescript/prefer-promise-reject-errors
     ctx.on('agent-loop/config-start-failed', () => Promise.reject(unrenderable) as never)
     ctx.on('agent-loop/config-start-failed', ({ error }) => { failures.push(error) })
-    vi.spyOn(ctx.sessionPersistence, 'list').mockRejectedValue(unrenderable)
+    vi.spyOn(ctx.sessionPersistence, 'inspect').mockRejectedValue(unrenderable)
     const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => undefined)
 
     await ctx.plugin(AgentLoop, {
@@ -476,7 +516,7 @@ describe('startup reporting after factory teardown', () => {
     const gate = Promise.withResolvers<never>()
     // The teardown path may drop the pending lookup without awaiting it.
     gate.promise.catch(() => undefined)
-    vi.spyOn(ctx.sessionPersistence, 'list').mockReturnValue(gate.promise)
+    vi.spyOn(ctx.sessionPersistence, 'inspect').mockReturnValue(gate.promise)
     const failures: unknown[] = []
     ctx.on('agent-loop/config-start-failed', ({ error }) => { failures.push(error) })
     const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => undefined)
