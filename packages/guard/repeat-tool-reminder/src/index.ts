@@ -155,6 +155,18 @@ interface Chain {
 }
 
 /**
+ * The final configured threshold. {@link validateThresholds} enforces a
+ * non-empty list, so absence is a programming error, not a config state.
+ * @param thresholds - validated thresholds.
+ * @returns the last threshold.
+ */
+function lastThresholdOf(thresholds: number[]): number {
+  const last = thresholds.at(-1)
+  if (last === undefined) throw new Error('repeat-tool-reminder: thresholds must not be empty')
+  return last
+}
+
+/**
  * Install the guard's listeners.
  * @param ctx - plugin context; listeners are scoped to it and disposed with it.
  * @param config - validated {@link Config}; `thresholds` is re-checked fail-loud here.
@@ -163,8 +175,7 @@ export function apply(ctx: Context, config: Config): void {
   // schemastery's .default() guarantees the fields are set after validation.
   const thresholds = validateThresholds(config.thresholds as number[])
   const thresholdSet = new Set(thresholds)
-  const lastThreshold = thresholds[thresholds.length - 1] ?? thresholds.at(-1)
-  if (lastThreshold === undefined) throw new Error('repeat-tool-reminder: thresholds must not be empty')
+  const lastThreshold = lastThresholdOf(thresholds)
   /**
    * Re-fire interval for run lengths past `lastThreshold`: the last configured
    * gap between thresholds, so the default `[3, 5, 8]` re-fires the detailed
