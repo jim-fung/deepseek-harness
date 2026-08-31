@@ -163,6 +163,18 @@ export function apply(ctx: Context, config: Config): void {
   // schemastery's .default() guarantees the fields are set after validation.
   const thresholds = validateThresholds(config.thresholds as number[])
   const thresholdSet = new Set(thresholds)
+  const lastThreshold = thresholds[thresholds.length - 1] ?? thresholds.at(-1)
+  if (lastThreshold === undefined) throw new Error('repeat-tool-reminder: thresholds must not be empty')
+  /**
+   * Re-fire interval for run lengths past `lastThreshold`: the last configured
+   * gap between thresholds, so the default `[3, 5, 8]` re-fires the detailed
+   * reminder at 11, 14, 17, … The loop the guard exists to break is precisely
+   * the one that outruns the final threshold, so the reminder cadence continues
+   * at the same density instead of going silent. A single-element set has no
+   * gap to derive; its threshold doubles as the interval.
+   */
+  const previousThreshold = thresholds[thresholds.length - 2]
+  const cadence = previousThreshold === undefined ? lastThreshold : lastThreshold - previousThreshold
   const includePatterns = (config.include as string[]).map(wildcardToRegExp)
   const excludePatterns = (config.exclude as string[]).map(wildcardToRegExp)
   const argumentsPreviewChars = config.argumentsPreviewChars as number
@@ -196,7 +208,11 @@ export function apply(ctx: Context, config: Config): void {
     const chain = chains.get(exec.agent)
     const count = chain !== undefined && chain.key === key ? chain.count + 1 : 1
     chains.set(exec.agent, { key, count })
-    if (!thresholdSet.has(count)) return undefined
+    // Cadence re-fires keep the detailed tier's text verbatim (parameterized
+    // only by the true run length) — continuation, never escalation.
+    const reminderDue = thresholdSet.has(count)
+      || (count > lastThreshold && (count - lastThreshold) % cadence === 0)
+    if (!reminderDue) return undefined
     const text = count === thresholds[0]
       ? GENTLE_REMINDER
       : detailedReminder(exec.name, count, previewArguments(canonical, argumentsPreviewChars))

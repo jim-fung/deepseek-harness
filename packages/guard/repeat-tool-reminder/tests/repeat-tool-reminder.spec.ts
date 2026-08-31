@@ -95,6 +95,60 @@ describe('threshold escalation', () => {
     expect(found[0]!.text).toContain('repeating the exact same tool call') // gentle at 2
     expect(found[1]!.text).toContain('consecutive_calls: 4') // detailed at 4
   })
+
+  it('stays silent between the final threshold and the first cadence re-fire (9, 10 past 8)', async () => {
+    const ctx = await harness()
+    const adapter = new MockAdapter([
+      ...Array.from({ length: 10 }, (_, i) => toolCallResponse(`c${i}`, 'probe', { q: 'same' })),
+      textResponse('done'),
+    ])
+    ctx.llm.registerAdapter(['mock'], adapter)
+    const agent = ctx.agentLoop.create(SessionId('a1'), { provider: 'mock', model: 'mock' })
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await waitForIdle(ctx, agent)
+
+    const found = reminders(agent)
+    expect(found.map(r => r.source)).toEqual([3, 5, 8].map(count => guardSource('probe', count)))
+  })
+
+  it('re-fires the threshold-8 detailed reminder at every last-gap cadence step (11, 14, 17)', async () => {
+    const ctx = await harness()
+    const adapter = new MockAdapter([
+      ...Array.from({ length: 17 }, (_, i) => toolCallResponse(`c${i}`, 'probe', { q: 'same' })),
+      textResponse('done'),
+    ])
+    ctx.llm.registerAdapter(['mock'], adapter)
+    const agent = ctx.agentLoop.create(SessionId('a1'), { provider: 'mock', model: 'mock' })
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await waitForIdle(ctx, agent)
+
+    const found = reminders(agent)
+    expect(found.map(r => r.source)).toEqual([3, 5, 8, 11, 14, 17].map(count => guardSource('probe', count)))
+    expect(found[0]!.text).toContain('repeating the exact same tool call') // gentle tier stays first-only
+    // Cadence continuation, not escalation: each re-fire is the threshold-8
+    // detailed text verbatim, with only the run length re-parameterized.
+    const atEight = found[2]!.text
+    for (const [index, count] of [11, 14, 17].entries()) {
+      expect(found[3 + index]!.text).toBe(atEight.replace('consecutive_calls: 8', `consecutive_calls: ${count}`))
+    }
+  })
+
+  it('falls back to the threshold interval for a single-element thresholds set ([4]: 4, 8, 12)', async () => {
+    const ctx = await harness({ thresholds: [4] })
+    const adapter = new MockAdapter([
+      ...Array.from({ length: 12 }, (_, i) => toolCallResponse(`c${i}`, 'probe', { q: 'same' })),
+      textResponse('done'),
+    ])
+    ctx.llm.registerAdapter(['mock'], adapter)
+    const agent = ctx.agentLoop.create(SessionId('a1'), { provider: 'mock', model: 'mock' })
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await waitForIdle(ctx, agent)
+
+    const found = reminders(agent)
+    expect(found.map(r => r.source)).toEqual([4, 8, 12].map(count => guardSource('probe', count)))
+    expect(found[0]!.text).toContain('repeating the exact same tool call') // gentle at the only threshold
+    expect(found[2]!.text).toContain('consecutive_calls: 12') // detailed on the cadence
+  })
 })
 
 describe('chain semantics', () => {
