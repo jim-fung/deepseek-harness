@@ -151,6 +151,30 @@ describe('TokenMeter pricing', () => {
     expect(service.estimateMessage(textMessage('abcd'))).toBe(9)
   })
 
+  it('prices CJK scripts near one token per character and non-CJK text at four characters per token', () => {
+    const service = meter()
+    // Same code-point count, one ladder rung per script mix: three ASCII
+    // characters price ceil(3/4) = 1 text token, one CJK ideograph plus two
+    // ASCII characters price 1 + ceil(2/4) = 2, and three ideographs price
+    // one each — the density compaction thresholds rely on for CJK-heavy
+    // sessions. Totals include the 4-token block and 4-token role overhead.
+    expect(service.estimateMessage(textMessage('abc'))).toBe(9)
+    expect(service.estimateMessage(textMessage('深ab'))).toBe(10)
+    expect(service.estimateMessage(textMessage('深度搜'))).toBe(11)
+  })
+
+  it('prices every CJK-density range at one token per character', () => {
+    const service = meter()
+    // One character from each priced range: a CJK Unified ideograph, CJK
+    // punctuation, Hiragana, Katakana, a Hangul syllable, and a fullwidth
+    // form. Each prices 1 text token, so each message totals 9 like the
+    // four-character ASCII message above.
+    const samples = ['漢', '、', 'あ', 'ガ', '가', '！']
+    for (const sample of samples) {
+      expect(service.estimateMessage(textMessage(sample))).toBe(9)
+    }
+  })
+
   it('returns a detached deeply immutable empty measurement', () => {
     const service = meter()
     const session = Session.create(SessionId('empty'))

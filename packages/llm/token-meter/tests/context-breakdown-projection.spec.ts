@@ -308,4 +308,22 @@ describe('shared estimator', () => {
     expect(estimateHeader({ config: CONFIG, system: 'abcdefgh', tools: TOOLS }))
       .toBe(6 + Math.ceil(JSON.stringify(TOOLS).length / 4) + 4)
   })
+
+  it('walks envelope text and JSON structure strings through the same CJK-aware density', () => {
+    // Four ideographs price one token each: 4 text + 4 role overhead.
+    expect(estimateSystemTokens({ config: CONFIG, system: '深度搜索' })).toBe(8)
+    // A tool schema with a CJK description walks the same density as message
+    // text: 23 text tokens for the schema JSON + 4 structural overhead.
+    const cjkTools: ToolSchema[] = [{
+      name: 'search',
+      description: '搜索文件内容',
+      parameters: { type: 'object' },
+    }]
+    expect(estimateToolsTokens({ config: CONFIG, tools: cjkTools })).toBe(27)
+    // The unknown-block structural price shares the walk too: 4 ideographs
+    // at one each plus the ASCII JSON framing at four per token prices 12,
+    // with the per-block structural overhead on top.
+    const unknown = { type: 'mystery', payload: '深度搜索' } as unknown as ContentBlock
+    expect(estimateContent([unknown])).toBe(16)
+  })
 })
