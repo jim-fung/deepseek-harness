@@ -80,7 +80,9 @@ describe('dsh run with Agent Teams enabled', () => {
         result.exitCode,
         `dsh headless profile exited unexpectedly.\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
       ).toBe(0)
-      expect(result.stderr).toBe('')
+      // The headless runner's stderr carries only its progress heartbeat lines;
+      // execa strips the final newline, so the last line may be unterminated.
+      expect(result.stderr).toMatch(/^(?:# (?:turn started|tool: \S+)\n)*(?:# (?:turn started|tool: \S+))?$/)
       expect(result.stdout).toContain('TEAM_WORKFLOW_OK')
 
       const files = (await readdir(sessions, { recursive: true }))

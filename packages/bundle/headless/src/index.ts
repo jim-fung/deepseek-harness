@@ -2,8 +2,8 @@
  * @deepseek-ai/dsh-headless — one-shot direct Agent driver. The bundle patch
  * rides over dsh-base without Host, HTTP, or browser plugins; this runner
  * creates one Agent through the core registry, drives the task to quiescence,
- * streams provider reasoning to stderr, flushes its Session, prints the final
- * assistant text to stdout, and exits.
+ * streams turn and tool heartbeats plus provider reasoning to stderr, flushes
+ * its Session, prints the final assistant text to stdout, and exits.
  *
  * @module @deepseek-ai/dsh-headless
  */
@@ -84,14 +84,17 @@ function summarize(events: readonly SessionEvent[], firstSeq: number): RunOutcom
 }
 
 /**
- * Project provider-reported reasoning from one owned run to stderr as it is
- * appended, while keeping final outcome derivation on the durable log.
+ * Project one owned run's progress to stderr as it occurs — a heartbeat line
+ * per turn and per tool call, then provider-reported reasoning as it is
+ * appended — while keeping final outcome derivation on the durable log.
+ * Heartbeat lines are progress-channel only: they reach no stdout stream and
+ * no session event.
  * @param ctx - plugin context carrying the Session event feed.
- * @param agent - the exact Agent whose reasoning belongs to this invocation.
+ * @param agent - the exact Agent whose run belongs to this invocation.
  * @param stderr - progress output sink.
  * @returns a disposer that also terminates an unterminated reasoning line.
  */
-function streamReasoning(
+function streamProgress(
   ctx: Context,
   agent: Agent,
   stderr: HeadlessIo['stderr'],
@@ -109,10 +112,17 @@ function streamReasoning(
     if (session !== agent.session) return
     if (event.type === 'turn/start') {
       close()
+      stderr.write('# turn started\n')
       started = true
       return
     }
-    if (!started || event.type !== 'assistant/chunk') return
+    if (!started) return
+    if (event.type === 'tool/call') {
+      close()
+      stderr.write(`# tool: ${event.data.name}\n`)
+      return
+    }
+    if (event.type !== 'assistant/chunk') return
     const chunk = event.data.chunk
     switch (chunk.type) {
       case 'reasoning-delta':
@@ -186,7 +196,7 @@ async function run(ctx: Context, task: string, io: HeadlessIo): Promise<void> {
   })
   await agent.whenIdle()
   const firstSeq = agent.session.seq
-  const stopReasoning = streamReasoning(ctx, agent, io.stderr)
+  const stopProgress = streamProgress(ctx, agent, io.stderr)
   try {
     agent.followup(createUserMessage({
       content: [{ type: 'text', text: task }],
@@ -194,11 +204,13 @@ async function run(ctx: Context, task: string, io: HeadlessIo): Promise<void> {
     }))
     await agent.whenIdle()
   } finally {
-    stopReasoning()
+    stopProgress()
   }
   await sessions.flush(agent.session)
   const outcome = summarize(agent.session.events, firstSeq)
-  io.stdout.write(outcome.text + '\n')
+  // An empty outcome writes no stdout byte: the exit code already carries the
+  // failure, and a bare newline forces piped consumers to trim.
+  if (outcome.text !== '') io.stdout.write(outcome.text + '\n')
   if (outcome.reason?.kind === 'error') {
     io.stderr.write(`dsh: ${outcome.reason.error.code}: ${outcome.reason.error.message}\n`)
   }

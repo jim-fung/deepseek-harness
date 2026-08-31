@@ -6,6 +6,8 @@ import AgentRegistry, { Inbox } from '@deepseek-ai/dsh-agent'
 import type { Agent, AgentHandle, CreateAgentOptions } from '@deepseek-ai/dsh-agent'
 import AgentDefaultModelConfig from '@deepseek-ai/dsh-agent-default-model'
 import { createAssistantMessage } from '@deepseek-ai/dsh-llm'
+import type { ToolCallId } from '@deepseek-ai/dsh-llm'
+import { brandString } from '@deepseek-ai/dsh-brand'
 import SessionStore from '@deepseek-ai/dsh-session'
 import type { Session, UserMessage } from '@deepseek-ai/dsh-session'
 import { apply, Config, internals } from '../src/index.ts'
@@ -128,7 +130,7 @@ describe('headless runner', () => {
     expect(result).toEqual({
       code: 0,
       out: 'final answer\n',
-      err: '',
+      err: '# turn started\n# turn started\n',
       order: ['flush', 'exit'],
     })
     await test.ctx.fiber.dispose()
@@ -141,7 +143,50 @@ describe('headless runner', () => {
         appendTurn(session, 1, message, 'race-free answer', true)
       },
     })
-    expect(await test.run()).toMatchObject({ code: 0, out: 'race-free answer\n', err: '' })
+    expect(await test.run()).toMatchObject({ code: 0, out: 'race-free answer\n', err: '# turn started\n' })
+    await test.ctx.fiber.dispose()
+  })
+
+  it('heartbeats one stderr line per turn and per tool call, and none to stdout', async () => {
+    const test = await bench({
+      afterPrompt(session, message) {
+        session.append('turn/start', { turn: 1 })
+        session.append('step/start', { turn: 1, step: 1 })
+        session.append('user/message', message, { surfaceOp: 'append' })
+        // An unterminated reasoning line is closed before the heartbeat so
+        // every stderr line stays a single physical line.
+        session.append('assistant/chunk', {
+          turn: 1,
+          step: 1,
+          chunk: { type: 'reasoning-delta', index: 0, text: 'thinking' },
+        })
+        session.append('tool/call', {
+          turn: 1,
+          step: 1,
+          callId: brandString<ToolCallId>('call-read'),
+          name: 'read_file',
+          arguments: '{}',
+        })
+        session.append('assistant/message', {
+          turn: 1,
+          step: 1,
+          message: createAssistantMessage({
+            content: [{ type: 'text', text: 'after the tool' }],
+            source: { provider: 'test-provider', model: 'test-model' },
+          }),
+        }, { surfaceOp: 'append' })
+        session.append('step/end', { turn: 1, step: 1 })
+        session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+      },
+    })
+    const result = await test.run()
+    expect(result).toEqual({
+      code: 0,
+      out: 'after the tool\n',
+      err: '# turn started\ndsh: reasoning:\nthinking\n# tool: read_file\n',
+      order: ['flush', 'exit'],
+    })
+    expect(result.out).not.toContain('#')
     await test.ctx.fiber.dispose()
   })
 
@@ -237,13 +282,13 @@ describe('headless runner', () => {
     const result = await running
     expect(streamed).toEqual({
       out: '',
-      err: 'dsh: reasoning:\nchecking the workspace safely\nsecond pass\n',
+      err: '# turn started\ndsh: reasoning:\nchecking the workspace safely\nsecond pass\n',
       order: [],
     })
     expect(result).toEqual({
       code: 0,
       out: 'done\n',
-      err: 'dsh: reasoning:\nchecking the workspace safely\nsecond pass\n',
+      err: '# turn started\ndsh: reasoning:\nchecking the workspace safely\nsecond pass\n',
       order: ['flush', 'exit'],
     })
     await test.ctx.fiber.dispose()
@@ -253,7 +298,7 @@ describe('headless runner', () => {
     const test = await bench({
       afterPrompt(session, message) { appendTurn(session, 1, message, undefined, false) },
     })
-    expect(await test.run()).toMatchObject({ code: 1, out: '\n', err: '' })
+    expect(await test.run()).toMatchObject({ code: 1, out: '', err: '# turn started\n' })
     await test.ctx.fiber.dispose()
   })
 
@@ -272,8 +317,8 @@ describe('headless runner', () => {
     })
     expect(await test.run()).toMatchObject({
       code: 1,
-      out: '\n',
-      err: 'dsh: SERVER: provider unavailable\n',
+      out: '',
+      err: '# turn started\ndsh: SERVER: provider unavailable\n',
     })
     await test.ctx.fiber.dispose()
   })
@@ -298,15 +343,15 @@ describe('headless runner', () => {
     })
     expect(await test.run()).toMatchObject({
       code: 1,
-      out: '\n',
-      err: 'dsh: reasoning:\ntrying recovery\ndsh: SERVER: provider unavailable\n',
+      out: '',
+      err: '# turn started\ndsh: reasoning:\ntrying recovery\ndsh: SERVER: provider unavailable\n',
     })
     await test.ctx.fiber.dispose()
   })
 
   it('exits 1 when the owned interval contains no turn', async () => {
     const test = await bench({ afterPrompt: () => {} })
-    expect(await test.run()).toMatchObject({ code: 1, out: '\n', err: '' })
+    expect(await test.run()).toMatchObject({ code: 1, out: '', err: '' })
     await test.ctx.fiber.dispose()
   })
 

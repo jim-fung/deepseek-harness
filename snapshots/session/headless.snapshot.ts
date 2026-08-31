@@ -325,10 +325,18 @@ function stderrFromSession(log: string): string {
     if (record.type === 'turn/start') {
       close()
       started = true
+      output += '# turn started\n'
       continue
     }
     if (!started) continue
     const data = record.data as JsonObject | undefined
+    if (record.type === 'tool/call') {
+      const name = data?.name
+      if (typeof name !== 'string') throw new Error('headless snapshot tool call has no name')
+      close()
+      output += `# tool: ${name}\n`
+      continue
+    }
     if (record.type === 'reasoning-chunks') {
       if (!Array.isArray(data?.texts) || data.texts.some(text => typeof text !== 'string')) {
         throw new Error('headless snapshot reasoning chunks have invalid text')
@@ -630,6 +638,7 @@ describe('headless recorded-session snapshots', () => {
     ].map(record => JSON.stringify(record)).join('\n')
 
     expect(stderrFromSession(log)).toBe([
+      '# turn started',
       'dsh: reasoning:',
       'first',
       'dsh: reasoning:',
@@ -747,7 +756,10 @@ describe('headless recorded-session snapshots', () => {
         fixtures = await writeSessionFixtures(scenario, actualLogs, fixtures, contextOf(actualLogs.map(log => log.content)))
       }
 
-      expect(result.stdout).toBe(`${finalTextFromSession(fixtures[0] as string)}\n`)
+      // A no-message outcome writes no stdout bytes at all (the exit code
+      // carries the failure); a message ends with exactly one newline.
+      const finalText = finalTextFromSession(fixtures[0] as string)
+      expect(result.stdout).toBe(finalText === '' ? '' : `${finalText}\n`)
       expect(result.stderr).toBe(expectedStderr)
       expect(actualLogs, `${scenario.name}: persisted session count`).toHaveLength(fixtures.length)
       const actualContext = contextOf(actualLogs.map(log => log.content))

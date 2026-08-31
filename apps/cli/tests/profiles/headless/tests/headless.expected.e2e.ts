@@ -244,7 +244,7 @@ describe('headless stream-json snapshots', () => {
       },
     })
 
-    expect(result.stdout).toBe('\n')
+    expect(result.stdout).toBe('')
     await expect(result.stderr).toMatchFileSnapshot(headlessFailureExpected)
   }, LOADER_SMOKE_TEST_TIMEOUT_MS)
 
