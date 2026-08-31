@@ -16,10 +16,13 @@ import {
   scanZstdFrames,
 } from '@deepseek-ai/dsh-session-persistence-jsonl/src/zstd.ts'
 import { describe, expect, it } from 'vitest'
+import { startMemoryWireServer } from './fixtures/memory-wire-server.mjs'
 
 const goldensDir = fileURLToPath(new URL('./expected/', import.meta.url))
 const goalScenarioDir = join(goldensDir, 'goal-tools')
 const goalConfigPath = fileURLToPath(new URL('../goal.cordis.snapshot.yml', import.meta.url))
+const memoryScenarioDir = fileURLToPath(new URL('./snapshots/memory-tools/', import.meta.url))
+const memoryConfigPath = fileURLToPath(new URL('../memory.cordis.snapshot.yml', import.meta.url))
 const retryScenarioDir = join(goldensDir, 'provider-retry')
 const retryConfigPath = fileURLToPath(new URL('../retry.cordis.snapshot.yml', import.meta.url))
 const credentialsScenarioDir = join(goldensDir, 'missing-credential')
@@ -658,6 +661,56 @@ describe('headless stream-json snapshots', () => {
     const normalized = normalizeGoalStream(result.stdout, runCwd)
     if (refreshing) await writeFile(streamExpected, normalized)
     expect(normalized).toBe(await readFile(streamExpected, 'utf8'))
+  }, LOADER_SMOKE_TEST_TIMEOUT_MS)
+
+  it('replays persisted memory tools through the one-shot app', async () => {
+    const prompt = await scenarioPrompt(memoryScenarioDir, 'memory-tools')
+    const streamExpected = join(memoryScenarioDir, 'stream-json.expected.jsonl')
+    let runCwd = ''
+    const wire = await startMemoryWireServer()
+    try {
+      const result = await runLoaderSmoke({
+        label: 'memory tools headless stream-json snapshot',
+        tempDirPrefix: 'headless-snapshot-memory-tools-',
+        binScript,
+        libBinScript: binScript,
+        configPath: memoryConfigPath,
+        binArgs: [memoryConfigPath, prompt],
+        tsconfigPath,
+        env: {
+          DSH_SNAPSHOT: 'replay',
+          DSH_SNAPSHOT_FILE: join(memoryScenarioDir, 'session.jsonl'),
+          // The memory provider dials the in-test wire server; the reference
+          // rides the launching environment, so the composition carries no
+          // literal endpoint and no real supermemory.ai traffic can happen.
+          SUPERMEMORY_API_KEY: 'wire-mock-key',
+          DSH_SNAPSHOT_MEMORY_URL: `http://127.0.0.1:${wire.port}`,
+          DEEPSEEK_API_KEY: '',
+          NODE_OPTIONS: [process.env.NODE_OPTIONS, '--disable-warning=ExperimentalWarning'].filter(Boolean).join(' '),
+        },
+        prepare: (cwd) => { runCwd = cwd },
+        inspect: async (cwd) => {
+          const logs = await persistedLogs(cwd)
+          expect(logs).toHaveLength(1)
+          // The recall waterfall's contribution is durable: the persisted
+          // request header carries the assembled profile section verbatim, so
+          // an unreachable memory service (or a listener that never fired)
+          // fails here rather than passing on scripted text alone.
+          expect(logs[0]?.content).toContain('Durable memories about the user and past sessions:')
+          expect(logs[0]?.content).toContain('Prefers pnpm workspaces. Keeps PRs small.')
+        },
+      })
+
+      expect(result.stderr).toBe('')
+      const normalized = normalizeHeadlessStream(result.stdout, runCwd)
+      if (refreshing) await writeFile(streamExpected, normalized)
+      expect(normalized).toBe(await readFile(streamExpected, 'utf8'))
+      expect(normalized).toContain('memory_save')
+      expect(normalized).toContain('Saved to project')
+      expect(normalized).toContain('Prefers pnpm workspaces. Keeps PRs small.')
+    } finally {
+      await new Promise<void>((resolve) => { wire.server.close(() => { resolve() }) })
+    }
   }, LOADER_SMOKE_TEST_TIMEOUT_MS)
 
   it('delivers a continuable child result without parent polling', async () => {
