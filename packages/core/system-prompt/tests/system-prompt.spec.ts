@@ -374,6 +374,18 @@ describe('SystemPrompt', () => {
     expect(second.tools).toEqual([{ name: 't', description: 'tool', parameters: { type: 'object', properties: {} } }])
   })
 
+  it('reuses one detached parameters clone per unchanged provider object', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    const parameters = { type: 'object', properties: {} }
+    ctx.systemPrompt.tools(() => ({ schemas: [{ name: 't', description: 'tool', parameters }] }))
+
+    const first = await ctx.systemPrompt.assemble()
+    const second = await ctx.systemPrompt.assemble()
+    expect(first.tools[0]!.parameters).not.toBe(parameters)
+    expect(second.tools[0]!.parameters).toBe(first.tools[0]!.parameters)
+  })
+
   it('filters out empty section text from renderPrompt', () => {
     const result = renderPrompt({
       sections: [

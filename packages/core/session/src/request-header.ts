@@ -32,7 +32,7 @@ export function canonicalHeader(header: EpochHeader): EpochHeader {
 
 /** Canonical JSON equality for tool schemas assembled through the same path. */
 function sameSchema(a: ToolSchema, b: ToolSchema): boolean {
-  return JSON.stringify(a) === JSON.stringify(b)
+  return a === b || JSON.stringify(a) === JSON.stringify(b)
 }
 
 /**

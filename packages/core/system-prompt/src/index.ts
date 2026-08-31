@@ -233,6 +233,29 @@ function compareToolNames(a: ToolSchema, b: ToolSchema): number {
   return compareNames(a.name, b.name)
 }
 
+/**
+ * Detached parameter clones keyed by the provider-returned source object.
+ * The cache owns each clone and consumers read them only; weak keys let
+ * entries be collected with their source objects.
+ */
+const parameterClones = new WeakMap<object, ToolSchema['parameters']>()
+
+/**
+ * Detach one provider-returned parameters object, cloning only the first time
+ * that exact object is seen. A provider that rebuilds its parameters object
+ * per access (run_code's language-aware getters) never hits and keeps getting
+ * a fresh clone.
+ * @param parameters - the provider-returned parameters object.
+ * @returns the detached clone of that exact object.
+ */
+function detachedParameters(parameters: ToolSchema['parameters']): ToolSchema['parameters'] {
+  const cached = parameterClones.get(parameters)
+  if (cached !== undefined) return cached
+  const clone = structuredClone(parameters)
+  parameterClones.set(parameters, clone)
+  return clone
+}
+
 /** Plugin config: the deployment-authored fragment of the system prompt (see {@link Config.persona} for its contract). */
 export interface Config {
   /** Include the fixed DeepSeek Harness identity before the deployment persona (default true). */
@@ -564,7 +587,7 @@ export class SystemPrompt extends Service {
       const schemas = result.schemas.map(({ name, description, parameters }): ToolSchema => ({
         name,
         description,
-        parameters: structuredClone(parameters),
+        parameters: detachedParameters(parameters),
       }))
       const acceptedKnownNames = result.knownNames ?? schemas.map(tool => tool.name)
       collected.push(...schemas)
