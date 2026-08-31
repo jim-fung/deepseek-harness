@@ -14,8 +14,8 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 const LOST_PREFIX_MESSAGE = '<response clipped><NOTE>The beginning of this command output was dropped by the terminal scrollback limit. The following text is the earliest retained output.</NOTE>\n'
 const SHELL_RESET_MESSAGE = 'The persistent bash shell was reset; the next bash call starts from the workspace with a fresh current directory and environment.'
 const TIMEOUT_CODE = 'PERSISTENT_BASH_TIMEOUT'
-// One page is enough to find a just-emitted completion marker; the full
-// scrollback is assembled only when a command settles or needs partial output.
+// One page is enough to find a just-emitted completion marker; when a command
+// settles, only the pages covering its marker span are assembled.
 const SCROLLBACK_PAGE_LINES = 1_000
 const POLL_INTERVAL_MS = 25
 // The fallback only serves recovery of output from the start marker, of which
@@ -157,16 +157,27 @@ function retainedScrollback(
   ctx: Context,
   owner: Agent,
   id: TerminalSessionId,
+  marker: CommandMarkers,
   latest = ctx.terminals.read(owner, id, { offset: 0, count: SCROLLBACK_PAGE_LINES }),
 ): RetainedOutput {
   const pages: string[] = latest.text.length === 0 ? [] : [latest.text]
-  let offset = latest.lineEnd
   let truncated = latest.truncated
-  while (true) {
+  // Markers cannot span a page seam — seams join whole lines with '\n' — so a
+  // per-page search sees every occurrence a whole-scrollback join would.
+  // Assembly covers only the marker span: every page newer than the start
+  // marker is read on the way, then one older margin page closes the span.
+  // Without a start marker anywhere the loop exhausts the scrollback and the
+  // whole retained text is returned (the lost-prefix path).
+  let spanPageSeen = latest.text.includes(marker.start)
+  let marginTaken = false
+  let offset = latest.lineEnd
+  while (!spanPageSeen || !marginTaken) {
     if (offset >= latest.totalLines) break
     const page = ctx.terminals.read(owner, id, { offset, count: SCROLLBACK_PAGE_LINES })
     truncated ||= page.truncated
     if (page.text.length > 0) pages.unshift(page.text)
+    if (spanPageSeen) marginTaken = true
+    else spanPageSeen = page.text.includes(marker.start)
     const next = nextScrollbackOffset(page, offset)
     if (next === undefined || next >= page.totalLines) break
     offset = next
@@ -221,7 +232,7 @@ async function respondToSessionExit(
   fallbackTruncated: boolean,
   config: ResolvedConfig,
 ): Promise<string> {
-  const snapshot = retainedScrollback(ctx, owner, id)
+  const snapshot = retainedScrollback(ctx, owner, id, marker)
   await shells.reset(owner, 'persistent bash shell exited')
   return [
     renderShellExitStatus(
@@ -374,7 +385,7 @@ async function executeCommand(
     const latest = ctx.terminals.read(owner, id, { offset: 0, count: SCROLLBACK_PAGE_LINES })
     const timedOut = timeoutOf(commandDeadline.signal, TIMEOUT_CODE)
     if (timedOut !== undefined) {
-      const snapshot = retainedScrollback(ctx, owner, id, latest)
+      const snapshot = retainedScrollback(ctx, owner, id, marker, latest)
       const partial = renderCaptured(
         partialOutput(snapshot, marker, fallback, fallbackTruncated),
         config.maxOutputChars,
@@ -392,7 +403,7 @@ async function executeCommand(
       commandDeadline.signal.throwIfAborted()
     }
     if (latest.text.includes(marker.end)) {
-      const complete = commandOutput(retainedScrollback(ctx, owner, id, latest), marker)
+      const complete = commandOutput(retainedScrollback(ctx, owner, id, marker, latest), marker)
       if (complete !== undefined) return renderCaptured(complete, config.maxOutputChars)
     }
     if (result.sessionStatus.kind === 'exited') {
@@ -405,7 +416,7 @@ async function executeCommand(
     // or an interactive child. Return what was captured instead of spinning
     // until the command deadline.
     if (result.waitReason === 'stdin_read') {
-      const snapshot = retainedScrollback(ctx, owner, id, latest)
+      const snapshot = retainedScrollback(ctx, owner, id, marker, latest)
       return renderCaptured(
         partialOutput(snapshot, marker, fallback, fallbackTruncated),
         config.maxOutputChars,

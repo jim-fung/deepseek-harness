@@ -114,6 +114,7 @@ class StubTerminalSession implements TerminalBackendSession {
   closed: string[] = []
   mode: StubMode
   sends = 0
+  reads = 0
   pendingText = ''
   historyTruncated = false
   throwOnSend = false
@@ -251,6 +252,7 @@ class StubTerminalSession implements TerminalBackendSession {
   }
 
   read(request: TerminalReadRequest) {
+    this.reads += 1
     if (this.mode === 'empty-read') {
       return { text: '', totalLines: 0, lineBegin: 0, lineEnd: 0, truncated: false }
     }
@@ -522,6 +524,22 @@ describe('tool-pwsh-persistent', () => {
     session.scrollback = 'older one\nolder two\nolder three\nolder four\n'
 
     expect(text(await call(ctx, owner, 'paged output'))).toBe('hello from stub')
+  })
+
+  it('settles a command by reading only the pages covering its markers', async () => {
+    const { ctx, owner, stub } = await setup({ backendType: 'stub', maxOutputChars: 1_000 })
+    await call(ctx, owner, 'warm up')
+    const session = stub.sessions[0]!
+    session.mode = 'paged-scrollback'
+    session.scrollback = `${Array.from({ length: 40 }, (_, index) => `filler ${index}`).join('\n')}\n`
+    const readsBefore = session.reads
+
+    expect(text(await call(ctx, owner, 'markers near the end'))).toBe('hello from stub')
+    // The 44-line scrollback pages into fifteen 3-line pages; joining the whole
+    // scrollback would read all of them. The marker-span search reads three:
+    // the polled newest page, the page carrying the start marker, and one
+    // older margin page.
+    expect(session.reads - readsBefore).toBe(3)
   })
 
   it('sanitizes a prompt fallback reached after multiple polling rounds', async () => {
