@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import { CallId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import MemoryRuntime from '@deepseek-ai/dsh-memory'
 import type { MemoryAddRequest, MemoryProvider, MemoryScope, MemorySearchRequest } from '@deepseek-ai/dsh-memory'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
@@ -44,7 +44,7 @@ async function mount(options: {
   await ctx.plugin(ToolMemory, options.config ?? {})
   let counter = 0
   const call = (name: string, args: unknown) =>
-    ctx.tools.execute({ signal: testToolSignal, callId: CallId(`call-${++counter}`), name, arguments: args })
+    ctx.tools.execute({ signal: testToolSignal, callId: ToolCallId(`call-${++counter}`), name, arguments: args })
   return { ctx, call }
 }
 
@@ -193,7 +193,7 @@ describe('registered tools', () => {
   it('classifies only memory_search as concurrency-safe', async () => {
     const { ctx } = await mount()
     const exec = (name: string, args: unknown) =>
-      ctx.tools.executionMode({ signal: testToolSignal, callId: CallId(name), name, arguments: args })
+      ctx.tools.executionMode({ signal: testToolSignal, callId: ToolCallId(name), name, arguments: args })
     expect(exec('memory_search', { query: 'q', scope: 'global' })).toEqual({ kind: 'parallel' })
     expect(exec('memory_save', { content: 'x', scope: 'global' })).toEqual({ kind: 'exclusive' })
     expect(exec('memory_forget', { id: 'x' })).toEqual({ kind: 'exclusive' })

@@ -954,7 +954,7 @@ describe('HarnessSdkJsonRpcServer', () => {
           provider: 'deepseek-official',
           model: 'model',
           reasoningEffort,
-        })).rejects.toThrow('initialize reasoningEffort must be a non-empty string')
+        })).rejects.toThrow('invalid params: reasoningEffort must be a non-empty string')
       }
       await server.shutdown()
     } finally {
