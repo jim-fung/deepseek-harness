@@ -291,17 +291,9 @@ export class BasicCompactionEngine extends CompactionEngine {
       return this.compactRegion(range.start, range.end, agent, signal)
     }
 
-    const context = (await this.ctx.llm.resolveModelInfo(target.provider, target.model, signal)).context
+    const contextWindow = await this.requireContextWindow(target, signal)
     assertNoActiveCompaction(agent.session, 'automatic pressure compaction')
-    const targetKey = `${target.provider}/${target.model}`
-    if (context === undefined) {
-      throw new TargetPressureConfigError(
-        targetKey,
-        `compaction-basic: no context capacity for ${targetKey}; `
-        + 'configure contextWindow on that adapter model',
-      )
-    }
-    const spec = resolveCompactSpec(policy, context.contextWindow)
+    const spec = resolveCompactSpec(policy, contextWindow)
     if (measurement.totalTokens < spec.thresholdTokens) return null
 
     // Once pressure qualifies, land the model-free pass before choosing a
@@ -359,8 +351,35 @@ export class BasicCompactionEngine extends CompactionEngine {
   }
 
   /**
+   * Resolve one routed target's context capacity, failing loud when its
+   * adapter declares none: both compaction triggers price retention and
+   * thresholds against the same capacity.
+   * @param target - exact durable provider/model route to resolve.
+   * @param signal - cancellation forwarded to model resolution.
+   * @returns the positive adapter-owned context window.
+   */
+  private async requireContextWindow(
+    target: Pick<LlmCallConfig, 'provider' | 'model'>,
+    signal: AbortSignal,
+  ): Promise<number> {
+    const context = (await this.ctx.llm.resolveModelInfo(target.provider, target.model, signal)).context
+    if (context === undefined) {
+      const targetKey = `${target.provider}/${target.model}`
+      throw new TargetPressureConfigError(
+        targetKey,
+        `compaction-basic: no context capacity for ${targetKey}; `
+        + 'configure contextWindow on that adapter model',
+      )
+    }
+    return context.contextWindow
+  }
+
+  /**
    * Force one useful idle-session compaction below the pressure threshold, and
    * resolve only after its standalone marker pair is durably checkpointed.
+   * The retained tail is the same policy budget the pressure trigger uses, so
+   * the documented "recent tail stays verbatim" contract holds for both
+   * triggers and one retention knob governs them.
    * @param agent - idle agent whose next-turn admission this call reserves.
    * @param signal - cancellation scoped to this compaction request.
    * @param sourceCommandId - initiating command identity for presentation correlation.
@@ -377,10 +396,20 @@ export class BasicCompactionEngine extends CompactionEngine {
         const operationSignal = AbortSignal.any([agentSignal, signal])
         try {
           operationSignal.throwIfAborted()
+          // Without a routed request there is no policy to price retention
+          // against; the summarizer's own fallback chain then decides whether
+          // a summary is possible at all.
+          const target = routedTarget(agent.session)
+          const retainTokens = target === undefined
+            ? 0
+            : resolveCompactSpec(
+              resolveTargetPolicy(this.config, target),
+              await this.requireContextWindow(target, operationSignal),
+            ).retainTokens
           const range = selectCompactableRange(
             agent.session,
             this.ctx.tokenMeter.measure(agent.session),
-            0,
+            retainTokens,
           )
           if (range === null) return null
           return await compactSurfaceRegion(

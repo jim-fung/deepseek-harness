@@ -97,7 +97,7 @@ interface LoopHarness {
 }
 
 /** Real loop, session store, and invariant companions around manual compaction. */
-async function loopHarness(): Promise<LoopHarness> {
+async function loopHarness(retainTokens = 1): Promise<LoopHarness> {
   const ctx = new Context()
   await mountAgentLoopTestDependencies(ctx)
   await ctx.plugin(InvariantRegistry)
@@ -111,7 +111,7 @@ async function loopHarness(): Promise<LoopHarness> {
   await ctx.plugin(TokenMeter)
   const adapter = new TextAdapter()
   ctx.llm.registerAdapter([MODEL], adapter)
-  const compact = new GatedCompactionEngine(ctx, { auto: false })
+  const compact = new GatedCompactionEngine(ctx, { auto: false, retainTokens })
   const agent = ctx.agentLoop.create(SessionId('manual-compact'), { provider: MODEL, model: MODEL })
   const log: string[] = []
   ctx.on('session/event', (_session, event) => {
@@ -231,7 +231,7 @@ function detachedService(): { ctx: Context; compact: GatedCompactionEngine; flus
     flushes += 1
     return Promise.resolve(false)
   })
-  return { ctx, compact: new GatedCompactionEngine(ctx, { auto: false }), flushes: () => flushes }
+  return { ctx, compact: new GatedCompactionEngine(ctx, { auto: false, retainTokens: 1 }), flushes: () => flushes }
 }
 
 function compactEvents(session: Session): Array<Session['events'][number]> {
@@ -247,7 +247,7 @@ describe('compactNow through the real loop', () => {
     compact.gate = gate.promise
 
     const running = compact.compactNow(agent, SIGNAL)
-    await Promise.resolve()
+    await new Promise<void>((resolve) => { setTimeout(resolve, 5) })
     expect(log).toEqual(['compaction/start:null'])
     agent.followup(createUserMessage({
       content: [{ type: 'text', text: 'after compaction' }],
@@ -280,6 +280,31 @@ describe('compactNow through the real loop', () => {
     expect(second[0]).toContain('checkpoint')
     expect(second.at(-1)).toBe('after compaction')
     expect(second.some(text => text.includes(PROMPT))).toBe(false)
+  })
+
+  it('retains the recent tail verbatim per the retention policy while condensing older history', async () => {
+    const finalTail = 'final exchange tail '.repeat(120)
+    const harness = await loopHarness(500)
+    const { agent, compact } = harness
+    await seedHistory(harness)
+    agent.followup(createUserMessage({
+      content: [{ type: 'text', text: finalTail }],
+      source: { kind: 'user' },
+    }))
+    await agent.whenIdle()
+
+    const result = await compact.compactNow(agent, SIGNAL)
+
+    expect(result).not.toBeNull()
+    const messages = derivedText(agent.session)
+    // The older seeded exchange survives only as the checkpoint summary; the
+    // whole newer exchange stays verbatim behind it, per the same retained-tail
+    // budget the pressure trigger uses.
+    expect(messages).toHaveLength(3)
+    expect(messages[0]).toContain('<compacted-summary>checkpoint</compacted-summary>')
+    expect(messages[1]).toBe(finalTail)
+    expect(messages[2]).toBe('answer')
+    expect(messages.some(text => text.includes('older conversation history'))).toBe(false)
   })
 
   it('keeps context injected during summarization pending for the next step', async () => {
@@ -540,7 +565,7 @@ describe('compactNow transaction and failure classification', () => {
     const generation = session.surface.replaceGeneration
 
     const running = compact.compactNow(agent, SIGNAL)
-    await Promise.resolve()
+    await new Promise<void>((resolve) => { setTimeout(resolve, 5) })
     expect(compact.calls).toHaveLength(1)
 
     gate.resolve()
@@ -854,7 +879,7 @@ describe('compactNow transaction and failure classification', () => {
     compact.gate = gate.promise
 
     const manual = compact.compactNow(agent, SIGNAL)
-    await Promise.resolve()
+    await new Promise<void>((resolve) => { setTimeout(resolve, 5) })
     const nodes = session.surface.nodes
     await expect(compact.compactRegion(
       nodes[0]!,
