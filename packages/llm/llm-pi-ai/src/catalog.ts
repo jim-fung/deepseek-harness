@@ -643,6 +643,28 @@ interface ModelReasoning {
 }
 
 /**
+ * Effort spellings dsh owns for installed catalog models whose responses
+ * dispatch would otherwise silently degrade the advertised ladder: pi-ai
+ * clamps `xhigh` and `max` to `high` unless the model carries an explicit
+ * `thinkingLevelMap`, and these entries carry none. The map pins every level —
+ * the gpt-5.6 API takes the explicit `none` effort for `off` and each named
+ * level verbatim — so the two top tiers the picker offers reach the wire. A
+ * profile's own `reasoningEfforts` and an upstream-supplied map both win over
+ * this table; a pi-ai upgrade that ships maps for these ids turns it into
+ * dead data to delete.
+ */
+const RESPONSES_EFFORT_MAP_CORRECTIONS: ReadonlyMap<string, ThinkingLevelMap> = new Map([
+  ['gpt-5.6-sol', { off: 'none', minimal: null, low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' }],
+  ['gpt-5.6-terra', { off: 'none', minimal: null, low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' }],
+  ['gpt-5.6-luna', { off: 'none', minimal: null, low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' }],
+])
+
+/** The responses-family dispatches whose effort spelling the map controls. */
+const RESPONSES_EFFORT_MAP_APIS: ReadonlySet<string> = new Set([
+  'openai-responses', 'azure-openai-responses', 'openai-codex-responses',
+])
+
+/**
  * Resolve one model's reasoning capability from its declared efforts.
  *
  * A declared dict translates to pi-ai's `thinkingLevelMap` with every level
@@ -671,6 +693,12 @@ function resolveModelReasoning(
     // spell them, and no listing endpoint reports a model's reasoning
     // protocol. The entry's map (when any) arrives through the `...base`
     // spread in the model literal.
+    if (base?.reasoning === true
+      && base.thinkingLevelMap === undefined
+      && RESPONSES_EFFORT_MAP_APIS.has(base.api)) {
+      const corrected = RESPONSES_EFFORT_MAP_CORRECTIONS.get(entry.id)
+      if (corrected !== undefined) return { reasoning: true, thinkingLevelMap: corrected }
+    }
     return { reasoning: base?.reasoning ?? false }
   }
   // The installed entry's map may ride along through `...base`; pi-ai never

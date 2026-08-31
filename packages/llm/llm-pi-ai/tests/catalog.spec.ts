@@ -11,6 +11,7 @@ import { PiAiAdapter } from '@deepseek-ai/dsh-llm-pi-ai'
 import { getBuiltinModels } from '@earendil-works/pi-ai/providers/all'
 import { createModels, getSupportedThinkingLevels } from '@earendil-works/pi-ai'
 import type { Api, Model, OpenAICompletionsCompat, Provider } from '@earendil-works/pi-ai'
+import { resolveRouteModels, type RouteCatalog, type RouteCatalogRequest } from '../src/catalog.ts'
 import { resolveProfiles } from '../src/config.ts'
 import { buildProvider, supportedProtocols } from '../src/provider.ts'
 import { assemble } from './assemble.ts'
@@ -1215,6 +1216,56 @@ describe('configurable-provider directory', () => {
       settingsNs: 'llm-pi-ai',
       settingsPath: ['providers', 'openai-codex'],
       declared: false,
+    })
+  })
+})
+
+describe('installed-catalog effort corrections', () => {
+  // The real installed openai catalog, materialized as a live route would be.
+  type OpenAiRouteRequest = Partial<Omit<RouteCatalogRequest, 'provider'>> & Pick<RouteCatalogRequest, 'provider'>
+  function openaiRoute(request: OpenAiRouteRequest = { provider: 'openai' }): RouteCatalog {
+    return resolveRouteModels({
+      defaultContextWindow: 128_000,
+      defaultMaxTokens: 16_384,
+      defaultInput: ['text'],
+      ...request,
+    })
+  }
+
+  it('pins effort spellings on the gpt-5.6 models whose wire clamps xhigh and max', () => {
+    const { models } = openaiRoute()
+    const expected = {
+      off: 'none', minimal: null, low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max',
+    }
+    for (const id of ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']) {
+      const model = models.find(candidate => candidate.id === id)
+      if (model === undefined) throw new Error(`installed openai catalog is missing ${id}`)
+      expect(model.thinkingLevelMap, id).toEqual(expected)
+      // The advertised ladder itself is unchanged: the map only pins spellings.
+      expect(getSupportedThinkingLevels(model)).toEqual(['off', 'low', 'medium', 'high', 'xhigh', 'max'])
+    }
+  })
+
+  it('leaves models outside the correction table on the installed entry', () => {
+    const { models } = openaiRoute()
+    const older = models.find(candidate => candidate.id === 'gpt-5.5')
+    expect(older).toBeDefined()
+    // gpt-5.5 ships its own map (pi-ai pins its max unsupported); the table
+    // must not touch an entry the installed catalog already spells.
+    expect(older?.thinkingLevelMap).not.toEqual({
+      off: 'none', minimal: null, low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max',
+    })
+    expect(older?.thinkingLevelMap?.max).toBeNull()
+  })
+
+  it('yields to a profile-declared reasoningEfforts dict', () => {
+    const { models } = openaiRoute({
+      provider: 'openai',
+      models: [{ id: 'gpt-5.6-sol', reasoningEfforts: { off: null, high: 'high' } }],
+    })
+    const sol = models.find(candidate => candidate.id === 'gpt-5.6-sol')
+    expect(sol?.thinkingLevelMap).toEqual({
+      minimal: null, low: null, medium: null, xhigh: null, max: null, high: 'high',
     })
   })
 })
