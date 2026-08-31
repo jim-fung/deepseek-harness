@@ -10,11 +10,11 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-web'
 import { applyWebSearchTool, WEB_SEARCH_MAX_QUERIES, WEB_SEARCH_MAX_RESULTS } from './search.ts'
-import { applyWebFetchTool } from './fetch.ts'
+import { applyWebFetchTool, DEFAULT_FETCH_MAX_OUTPUT_CHARS } from './fetch.ts'
 
 export { WEB_SEARCH_MAX_QUERIES, WEB_SEARCH_MAX_RESULTS, applyWebSearchTool, formatSearchOutput, presentSearchCall, presentSearchResult, searchMetaFromValue, searchMetaFromResult } from './search.ts'
 export type { WebSearchMeta } from './search.ts'
-export { applyWebFetchTool, formatFetchOutput, parseFetchArgs, presentFetchCall, presentFetchResult, fetchMetaFromValue, fetchMetaFromResult } from './fetch.ts'
+export { applyWebFetchTool, DEFAULT_FETCH_MAX_OUTPUT_CHARS, formatFetchOutput, parseFetchArgs, presentFetchCall, presentFetchResult, fetchMetaFromValue, fetchMetaFromResult } from './fetch.ts'
 export type { WebFetchMeta } from './fetch.ts'
 
 /** Cordis plugin name used by loader diagnostics. */
@@ -25,13 +25,6 @@ export const inject = ['tools', 'web', 'systemPrompt']
 
 /** Default cooperative tool-call timeout budget (ms) for the web tools. */
 export const DEFAULT_WEB_TOOL_TIMEOUT_MS = 30_000
-
-/**
- * Default cap on one `web_fetch` output and on source characters converted
- * synchronously. This leaves headroom above the local provider's default
- * 100,000-character body cap while bounding custom providers and rendered output.
- */
-export const DEFAULT_FETCH_MAX_OUTPUT_CHARS = 200_000
 
 /** Plugin config: which web tools to register, search bounds, per-tool budgets, and the fetch output cap. */
 export interface Config {
@@ -47,7 +40,7 @@ export interface Config {
   fetchTimeoutMs?: number
   /** Cooperative timeout budget (ms) for `web_search`. Defaults to 30000. */
   searchTimeoutMs?: number
-  /** Cap on source characters converted and complete `web_fetch` output characters. Defaults to 200000. */
+  /** Cap on one complete `web_fetch` output; conversion reads at most `max(200000, 4 × this)` source characters. Defaults to 200000. */
   fetchMaxOutputChars?: number
 }
 

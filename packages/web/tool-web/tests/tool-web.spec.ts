@@ -19,6 +19,7 @@ import {
   searchMetaFromResult,
   fetchMetaFromValue,
   fetchMetaFromResult,
+  DEFAULT_FETCH_MAX_OUTPUT_CHARS,
   WEB_SEARCH_MAX_QUERIES,
   WEB_SEARCH_MAX_RESULTS,
 } from '@deepseek-ai/dsh-tool-web'
@@ -343,16 +344,40 @@ describe('fetch formatting', () => {
   it('bounds source conversion work before rendering a custom provider body', () => {
     const spy = vi.spyOn(TurndownService.prototype, 'turndown').mockReturnValue('converted')
     try {
+      // The conversion budget is max(200_000, 4 × cap): the floor binds a
+      // small cap, the multiple binds a large one.
       const out = formatFetchOutput({
         url: 'https://a.test', statusCode: 200, truncated: false,
-        body: { kind: 'html', content: `<p>${'x'.repeat(10_000)}</p>` },
+        body: { kind: 'html', content: `<p>${'x'.repeat(300_000)}</p>` },
       }, 500)
-      expect(spy).toHaveBeenCalledWith(`<p>${'x'.repeat(497)}`)
+      expect(spy).toHaveBeenCalledWith(`<p>${'x'.repeat(199_997)}`)
       expect(out.length).toBeLessThanOrEqual(500)
       expect(out).toContain('Content truncated')
+      formatFetchOutput({
+        url: 'https://a.test', statusCode: 200, truncated: false,
+        body: { kind: 'html', content: `<p>${'x'.repeat(500_000)}</p>` },
+      }, 100_000)
+      expect(spy).toHaveBeenLastCalledWith(`<p>${'x'.repeat(399_997)}`)
     } finally {
       spy.mockRestore()
     }
+  })
+
+  it('renders visible content that starts past the output-cap-sized source prefix the old budget reached', () => {
+    // A script/comment-heavy head: with the source budget equal to the output
+    // cap (200,000), every visible character sat past the cut and the footer
+    // claimed a narrower URL was needed. The derived budget converts the real
+    // content, and nothing was cut so no footer appears.
+    const content = `<script>${'var a = 1;'.repeat(20_000)}</script><!--${'c'.repeat(60_000)}--><h1>Real Content</h1><p>visible body text</p>`
+    const value = {
+      url: 'https://a.test', statusCode: 200, truncated: false,
+      body: { kind: 'html' as const, content },
+    }
+    const out = formatFetchOutput(value, DEFAULT_FETCH_MAX_OUTPUT_CHARS)
+    expect(out).toContain('# Real Content')
+    expect(out).toContain('visible body text')
+    expect(out).not.toContain('Content truncated')
+    expect((fetchMetaFromValue(value, DEFAULT_FETCH_MAX_OUTPUT_CHARS) as { truncated: boolean }).truncated).toBe(false)
   })
 
   it('validates url (non-empty), no timeout parameter', () => {

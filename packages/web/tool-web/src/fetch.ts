@@ -222,6 +222,25 @@ function exceedsConversionDepth(html: string): boolean {
   return false
 }
 
+/**
+ * Default cap on one complete `web_fetch` output. This leaves headroom above
+ * the local provider's default 100,000-character body cap while bounding
+ * rendered output, and floors the conversion source budget below.
+ */
+export const DEFAULT_FETCH_MAX_OUTPUT_CHARS = 200_000
+
+/**
+ * Source-budget multiple of the output cap: conversion reads at most
+ * `max(DEFAULT_FETCH_MAX_OUTPUT_CHARS, SOURCE_BUDGET_OUTPUT_MULTIPLE × cap)`
+ * source characters. HTML shrinks in conversion — script, style, comments, and
+ * hidden markup disappear — so a source budget equal to the output cap can cut
+ * a page whose visible text starts past it while the rendered result would
+ * have fit. Four cap-widths of source reach well past a non-visible head
+ * without an unbounded walk. A fixed bound on synchronous conversion work,
+ * like {@link MAX_CONVERSION_DEPTH}; not a tunable.
+ */
+const SOURCE_BUDGET_OUTPUT_MULTIPLE = 4
+
 interface RenderedBody {
   /** Converted text, or a fixed omission marker when conversion is unsafe. */
   text: string
@@ -280,9 +299,11 @@ interface RenderedFetch {
 /**
  * Render a fetch result to its bounded model-facing text and effective
  * truncation. The single source of both the `render` text and the fetch card's
- * `truncated`, so the card never disagrees with the text the model saw. The cap
- * limits the source prefix processed synchronously, then applies again where the
- * complete output — header, rendered body, and footer — is known.
+ * `truncated`, so the card never disagrees with the text the model saw. The
+ * source prefix converted synchronously is bounded at
+ * `max(DEFAULT_FETCH_MAX_OUTPUT_CHARS, SOURCE_BUDGET_OUTPUT_MULTIPLE × cap)`
+ * characters, then the cap applies again where the complete output — header,
+ * rendered body, and footer — is known.
  *
  * Package-internal: the only callers are {@link formatFetchOutput} and
  * {@link fetchMetaFromValue}, both reached through the tool registry, which
@@ -327,7 +348,7 @@ const renderCache = new WeakMap<WebFetchResult, Map<number, RenderedFetch>>()
  */
 function computeFetchOutput(result: WebFetchResult, maxOutputChars: number): RenderedFetch {
   const header = `Fetched ${result.url} (HTTP ${result.statusCode})\n\n${EXTERNAL_WEB_CONTENT_NOTICE}\n\n`
-  const rendered = renderBody(result.body, maxOutputChars)
+  const rendered = renderBody(result.body, Math.max(DEFAULT_FETCH_MAX_OUTPUT_CHARS, SOURCE_BUDGET_OUTPUT_MULTIPLE * maxOutputChars))
   const prefix = `${header}${rendered.text}`
   const truncated = result.truncated || rendered.sourceTruncated || prefix.length > maxOutputChars
   const full = `${prefix}${truncated ? TRUNCATION_FOOTER : ''}`
@@ -442,7 +463,9 @@ export function presentFetchResult(args: { url: string }, result: ToolResult): W
  * @param timeoutMs - the cooperative tool-call budget (ms) attached as the tool's
  *   `ToolDefinition.timeoutMs` for `@deepseek-ai/dsh-tool-call-timeout-policy` to enforce.
  * @param maxOutputChars - cap on the complete rendered tool output (see
- *   {@link formatFetchOutput}) and on source characters converted synchronously.
+ *   {@link formatFetchOutput}); conversion reads at most
+ *   `max(DEFAULT_FETCH_MAX_OUTPUT_CHARS, SOURCE_BUDGET_OUTPUT_MULTIPLE × this)`
+ *   source characters.
  */
 export function applyWebFetchTool(ctx: Context, timeoutMs: number, maxOutputChars: number): void {
   ctx.systemPrompt.section({
