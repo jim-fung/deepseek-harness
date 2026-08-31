@@ -25,8 +25,8 @@
 
 import { createRequire } from 'node:module'
 import {
-  existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync,
-  symlinkSync, unlinkSync, writeFileSync,
+  existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync,
+  statSync, symlinkSync, unlinkSync, writeFileSync,
 } from 'node:fs'
 import { basename, dirname, join, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -554,6 +554,220 @@ function moduleFallbackCurrent(modulesDir: string, entries: readonly ModuleFallb
   return entries.every(entry => moduleFallbackEntryCurrent(modulesDir, entry))
 }
 
+/** Stamp file inside the shared fallback recording the last completed discovery. */
+const HEAL_STAMP_FILENAME = '.dsh-heal.json'
+
+/**
+ * Fingerprint of the two inputs a discovery walk depends on: the installation
+ * anchor manifest and the workspace-root lockfile governing the anchor's
+ * resolved dependency closure. `null` fields record an absent file, and a
+ * stamp matches only when absence equals absence.
+ */
+interface HealFingerprint {
+  /** mtime of the anchor manifest, in milliseconds. */
+  anchorMtimeMs: number | null
+  /** Byte size of the anchor manifest. */
+  anchorSize: number | null
+  /** mtime of the workspace-root lockfile, in milliseconds; `null` when absent. */
+  lockfileMtimeMs: number | null
+  /** Byte size of the workspace-root lockfile; `null` when absent. */
+  lockfileSize: number | null
+}
+
+/**
+ * The durable record of one completed discovery: the {@link HealFingerprint}
+ * it ran under plus the fallback entries and package-name closure it
+ * concluded, so a later launch with unchanged inputs skips the walk.
+ */
+interface HealStamp extends HealFingerprint {
+  /** Fallback entries the concluded generation ensures, in discovery order. */
+  entries: ModuleFallbackEntry[]
+  /** Every package name the walk reached, including packages without a proxy entry. */
+  packageNames: string[]
+}
+
+/**
+ * The workspace-root lockfile governing the anchor's dependency closure. The
+ * app package sits exactly two levels below the workspace root in a checkout
+ * (`apps/<app>`), so that root is the anchor directory's grandparent; in a
+ * packaged install the same grandparent is the containing `node_modules`
+ * directory, which holds no lockfile, and that absence is stamped as null
+ * fields.
+ * @param installAnchor - absolute path of the dsh app's package.json.
+ * @returns the candidate lockfile path, which may not exist.
+ */
+function workspaceLockfilePath(installAnchor: string): string {
+  return join(dirname(dirname(dirname(installAnchor))), 'pnpm-lock.yaml')
+}
+
+/**
+ * Stamp the mtime and size of one fingerprint input; an absent file reads as
+ * `null` fields on both sides.
+ * @param path - the fingerprinted file.
+ * @returns the observable mtime and size, `null` fields when the file is absent.
+ */
+function statStampFields(path: string): { mtimeMs: number | null; size: number | null } {
+  try {
+    const stat = statSync(path)
+    return { mtimeMs: stat.mtimeMs, size: stat.size }
+  } catch {
+    // Absence (no lockfile beside a packaged install) is the expected cause;
+    // any other stat failure records the same nulls and fails open below.
+    return { mtimeMs: null, size: null }
+  }
+}
+
+/**
+ * Fingerprint the anchor manifest and workspace lockfile a discovery walk
+ * depends on.
+ * @param installAnchor - absolute path of the dsh app's package.json.
+ * @returns the observable mtime and size of both inputs.
+ */
+function healFingerprint(installAnchor: string): HealFingerprint {
+  const anchor = statStampFields(installAnchor)
+  const lockfile = statStampFields(workspaceLockfilePath(installAnchor))
+  return {
+    anchorMtimeMs: anchor.mtimeMs,
+    anchorSize: anchor.size,
+    lockfileMtimeMs: lockfile.mtimeMs,
+    lockfileSize: lockfile.size,
+  }
+}
+
+/**
+ * Whether a stamp's fingerprint equals the currently observable one, field by
+ * field, including absent lockfiles on both sides.
+ * @param stamp - the validated stamp from the fallback directory.
+ * @param current - the fingerprint taken this launch.
+ * @returns true when every field is equal.
+ */
+function sameHealFingerprint(stamp: HealStamp, current: HealFingerprint): boolean {
+  return stamp.anchorMtimeMs === current.anchorMtimeMs
+    && stamp.anchorSize === current.anchorSize
+    && stamp.lockfileMtimeMs === current.lockfileMtimeMs
+    && stamp.lockfileSize === current.lockfileSize
+}
+
+/**
+ * Whether a value read from the stamp file is one serialized
+ * {@link ModuleFallbackEntry}.
+ * @param value - one element of the parsed stamp's entry list.
+ * @returns true when the kind discriminator and its fields hold the expected types.
+ */
+function isStampEntry(value: unknown): value is ModuleFallbackEntry {
+  if (typeof value !== 'object' || value === null) return false
+  const fields = value as Record<string, unknown>
+  if (typeof fields.packageName !== 'string') return false
+  if (fields.kind === 'symlink') return typeof fields.packageDir === 'string'
+  if (fields.kind === 'proxy') {
+    return typeof fields.version === 'string'
+      && typeof fields.targets === 'object' && fields.targets !== null
+      && Object.values(fields.targets).every(target => typeof target === 'string')
+  }
+  return false
+}
+
+/**
+ * Whether a value parsed from the stamp file structurally matches
+ * {@link HealStamp}; the stamp is durable file data, so anything else fails
+ * open to the full heal.
+ * @param value - the parsed stamp content.
+ * @returns true when every field holds the expected type.
+ */
+function isHealStamp(value: unknown): value is HealStamp {
+  if (typeof value !== 'object' || value === null) return false
+  const fields = value as Record<string, unknown>
+  const numericOrNull = (field: unknown): boolean => typeof field === 'number' || field === null
+  return numericOrNull(fields.anchorMtimeMs) && numericOrNull(fields.anchorSize)
+    && numericOrNull(fields.lockfileMtimeMs) && numericOrNull(fields.lockfileSize)
+    && Array.isArray(fields.entries) && fields.entries.every(isStampEntry)
+    && Array.isArray(fields.packageNames) && fields.packageNames.every(name => typeof name === 'string')
+}
+
+/**
+ * Read the fallback's heal stamp.
+ * @param modulesDir - the shared fallback directory.
+ * @returns the validated stamp, or `undefined` when absent, unreadable, or
+ * corrupt — every such case runs the full heal instead.
+ */
+function readHealStamp(modulesDir: string): HealStamp | undefined {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(join(modulesDir, HEAL_STAMP_FILENAME), 'utf8'))
+    return isHealStamp(parsed) ? parsed : undefined
+  } catch {
+    // An absent, unreadable, or unparseable stamp (first run, corrupt or
+    // truncated content) cannot authorize skipping discovery.
+    return undefined
+  }
+}
+
+/**
+ * Record one completed discovery for later launches, written atomically
+ * (temp file + rename) while the fallback writer lock is held, so a
+ * concurrent launch reads either the previous stamp or this one, never a
+ * torn file. Best-effort: a write failure is swallowed because the stamp
+ * only skips work — the next launch repeats the full heal rather than losing
+ * any of it.
+ * @param modulesDir - the shared fallback directory.
+ * @param stamp - the completed discovery's record.
+ */
+function writeHealStamp(modulesDir: string, stamp: HealStamp): void {
+  const path = join(modulesDir, HEAL_STAMP_FILENAME)
+  const temp = `${path}.${process.pid}.tmp`
+  try {
+    writeFileSync(temp, JSON.stringify(stamp) + '\n')
+    renameSync(temp, path)
+  } catch {
+    rmSync(temp, { force: true, recursive: true })
+    // Stamp-write failures (read-only fallback directory, full disk, a
+    // non-file at the stamp path) are swallowed: healing already succeeded
+    // and only the next launch's skip is lost.
+  }
+}
+
+/**
+ * Whether a valid stamp authorizes this launch to skip discovery: the
+ * fingerprint is unchanged, every stamped entry carries this process's entry
+ * kind (plain Node and packaged executables conclude different generations),
+ * every fallback entry is still current, and every symlink entry's target
+ * package still exists so a moved or pruned installation re-runs the walk.
+ * Proxy entries are verified on the fallback side only; re-reading their
+ * source manifests is the walk's job.
+ * @param stamp - the validated stamp from the fallback directory.
+ * @param fingerprint - the fingerprint taken this launch.
+ * @param modulesDir - the shared fallback directory.
+ * @returns true when the stamped state is current for this process.
+ */
+function healStampCurrent(stamp: HealStamp, fingerprint: HealFingerprint, modulesDir: string): boolean {
+  if (!sameHealFingerprint(stamp, fingerprint)) return false
+  const stampedKind: ModuleFallbackEntry['kind'] = isPackagedExecutable() ? 'proxy' : 'symlink'
+  return stamp.entries.every(entry => entry.kind === stampedKind
+    && moduleFallbackEntryCurrent(modulesDir, entry)
+    && (entry.kind === 'proxy' || existsSync(join(entry.packageDir, 'package.json'))))
+}
+
+/**
+ * Refresh the stamp for a generation that is already current on disk, under
+ * the writer lock so concurrent launches cannot interleave stamp writes.
+ * Best-effort: only lock acquisition can fail (the write swallows its own
+ * failures), and losing the refresh costs only the next launch's skip, never
+ * this launch's healing.
+ * @param modulesDir - the shared fallback directory.
+ * @param stamp - the completed discovery's record.
+ */
+async function refreshHealStamp(modulesDir: string, stamp: HealStamp): Promise<void> {
+  try {
+    await withFileLock(modulesDir, () => {
+      writeHealStamp(modulesDir, stamp)
+      return Promise.resolve()
+    })
+  } catch {
+    // A read-only profiles directory or a lock-contention timeout skips the
+    // refresh; the fallback is already current and the next launch repeats
+    // discovery, so no failure mode is added.
+  }
+}
+
 /** Inputs for {@link healProfilesModuleFallback}. */
 export interface ProfileModuleFallbackOptions {
   /** Absolute package.json path of the running dsh installation. */
@@ -573,6 +787,21 @@ export interface ProfileModuleFallbackOptions {
  * bundles are linked through a profile-owned directory into that profile's
  * `node_modules`; pnpm-managed entries remain authoritative, and another
  * profile's links cannot change its resolution.
+ *
+ * The discovery walk behind that mirror reads every manifest in the
+ * dependency closure, so it runs only when the `.dsh-heal.json` stamp inside
+ * the fallback no longer matches the anchor manifest and the workspace-root
+ * lockfile (mtime and size of each; an absent lockfile matches only an
+ * absent lockfile) or one of its recorded entries is no longer current. The
+ * per-entry reconcile over the stamp runs on every launch, so a stale link,
+ * a vanished target package, or a process in the other entry mode (plain
+ * Node versus packaged executable) falls through to the walk. Any stamp
+ * read, shape, or write failure runs the walk instead; a failed stamp write
+ * never fails the launch. Residual hole: a hand-edited workspace manifest
+ * that touches neither the anchor nor the lockfile leaves the stamp
+ * matching, so healing picks its change up only on the next full walk; the
+ * Loader still rejects an unresolvable plugin loudly, just later and less
+ * targeted.
  * @param options - installation anchor, optional loaded profile, and Harness home.
  * @returns settlement after the shared fallback and profile-local links are current.
  */
@@ -581,10 +810,23 @@ export async function healProfilesModuleFallback(options: ProfileModuleFallbackO
   const profilesDir = join(home, PROFILES_DIR)
   const modulesDir = join(profilesDir, 'node_modules')
   mkdirSync(modulesDir, { recursive: true })
+  const stamp = readHealStamp(modulesDir)
+  const fingerprint = healFingerprint(installAnchor)
+  if (stamp !== undefined && healStampCurrent(stamp, fingerprint, modulesDir)) {
+    // Warm launch: the stamped generation is still current, and the
+    // per-entry reconcile inside healStampCurrent proved the fallback needs
+    // no work, so the walk and its lock are skipped entirely.
+    if (profile !== undefined) healProfileModuleFallback(profile, new Set(stamp.packageNames))
+    return
+  }
   const { entries, packageNames } = resolveModuleFallbackEntries(installAnchor)
-  if (!moduleFallbackCurrent(modulesDir, entries)) {
+  const discovered: HealStamp = { ...fingerprint, entries, packageNames: [...packageNames] }
+  if (moduleFallbackCurrent(modulesDir, entries)) {
+    await refreshHealStamp(modulesDir, discovered)
+  } else {
     await withFileLock(modulesDir, () => {
       if (!moduleFallbackCurrent(modulesDir, entries)) healProfilesModuleFallbackLocked(entries, modulesDir)
+      writeHealStamp(modulesDir, discovered)
       return Promise.resolve()
     })
   }

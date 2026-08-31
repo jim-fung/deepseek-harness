@@ -5,11 +5,11 @@
  */
 
 import {
-  existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync,
-  unlinkSync, writeFileSync,
+  chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync,
+  statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { withFileLock } from '@deepseek-ai/dsh-atomic-write'
 import { describe, expect, it } from 'vitest'
 import {
@@ -34,7 +34,9 @@ function stageInstallation(
   appName = 'dsh-app',
 ): string {
   const root = tmp()
-  const appDir = join(root, 'app')
+  // The app directory sits two levels below the staged root (`apps/<app>`),
+  // mirroring the checkout layout the workspace-lockfile derivation relies on.
+  const appDir = join(root, 'apps', 'app')
   mkdirSync(join(appDir, 'node_modules'), { recursive: true })
   const appDeps: Record<string, string> = {}
   for (const [name, spec] of Object.entries(bundles)) {
@@ -78,6 +80,22 @@ function stageProfile(home: string, name: string, bundleAnchor: string): Profile
     patchReload: 'live',
   }
 }
+
+/** The heal stamp's path inside a home's shared module fallback. */
+const stampPath = (home: string): string => join(home, 'profiles', 'node_modules', '.dsh-heal.json')
+
+/**
+ * An mtime no real stamp write can produce. The stamp is rewritten exactly
+ * when discovery runs, so marking it and checking whether it survived is a
+ * deterministic oracle for walk-versus-skip (no fs mocking needed).
+ */
+const MARK_TIME = new Date(86_400_000)
+
+/** Mark the stamp as untouched-by-a-warm-launch. */
+const markStamp = (home: string): void => { utimesSync(stampPath(home), MARK_TIME, MARK_TIME) }
+
+/** Whether the stamp still carries the mark (a discovery rewrote it). */
+const stampUntouched = (home: string): boolean => statSync(stampPath(home)).mtimeMs === MARK_TIME.getTime()
 
 describe('resolveProfileDir', () => {
   it('joins the home and rejects traversal-shaped names', () => {
@@ -954,5 +972,170 @@ describe('healProfilesModuleFallback', () => {
     } finally {
       delete (process as NodeJS.Process & { pkg?: unknown }).pkg
     }
+  })
+
+  it('stamps the fallback after the first heal with anchor and lockfile facts', async () => {
+    const anchor = stageInstallation({ 'bundle-a': { patch: '[]\n' } })
+    const lockfile = join(dirname(dirname(dirname(anchor))), 'pnpm-lock.yaml')
+    writeFileSync(lockfile, 'locks\n')
+    const home = tmp()
+    await healProfilesModuleFallback({ installAnchor: anchor, home })
+    const stamp = JSON.parse(readFileSync(stampPath(home), 'utf8')) as Record<string, unknown>
+    expect(stamp.anchorMtimeMs).toBe(statSync(anchor).mtimeMs)
+    expect(stamp.anchorSize).toBe(statSync(anchor).size)
+    expect(stamp.lockfileMtimeMs).toBe(statSync(lockfile).mtimeMs)
+    expect(stamp.lockfileSize).toBe(statSync(lockfile).size)
+    expect(stamp.entries).toContainEqual({ kind: 'symlink', packageName: 'dsh-app', packageDir: dirname(anchor) })
+    expect(stamp.packageNames).toEqual(expect.arrayContaining(['dsh-app', 'bundle-a']))
+  })
+
+  it('skips the discovery walk when the stamp still matches anchor and lockfile', async () => {
+    const anchor = stageInstallation({
+      'bundle-a': { patch: '[]\n', deps: { 'dep-of-a': '0.0.0' } },
+      '@ns/scoped': {},
+    })
+    const modules = join(anchor, '..', 'node_modules')
+    mkdirSync(join(modules, 'dep-of-a'), { recursive: true })
+    writeFileSync(join(modules, 'dep-of-a', 'package.json'), JSON.stringify({ name: 'dep-of-a', version: '0.0.0' }))
+    const home = tmp()
+    await healProfilesModuleFallback({ installAnchor: anchor, home }) // full walk, writes the stamp
+    const stamp = JSON.parse(readFileSync(stampPath(home), 'utf8')) as Record<string, unknown>
+    // No lockfile beside a staged install: absence is stamped and must equal absence.
+    expect(stamp.lockfileMtimeMs).toBeNull()
+    expect(stamp.lockfileSize).toBeNull()
+    markStamp(home)
+    await healProfilesModuleFallback({ installAnchor: anchor, home }) // unchanged inputs: skip, stamp not rewritten
+    expect(stampUntouched(home)).toBe(true)
+    // The skipped walk still reconciles every recorded entry, scoped or not.
+    const fallback = join(home, 'profiles', 'node_modules')
+    for (const name of ['bundle-a', '@ns/scoped', 'dep-of-a', 'dsh-app']) {
+      expect(lstatSync(join(fallback, name)).isSymbolicLink(), name).toBe(true)
+    }
+  })
+
+  it('re-runs the full heal when the anchor manifest changes after stamping', async () => {
+    const anchor = stageInstallation({ 'bundle-a': { patch: '[]\n' } })
+    const home = tmp()
+    await healProfilesModuleFallback({ installAnchor: anchor, home })
+    markStamp(home)
+    const touched = new Date(Date.now() + 60_000)
+    utimesSync(anchor, touched, touched)
+    await healProfilesModuleFallback({ installAnchor: anchor, home })
+    expect(stampUntouched(home)).toBe(false) // discovery rewrote the stamp
+    const stamp = JSON.parse(readFileSync(stampPath(home), 'utf8')) as { anchorMtimeMs: number }
+    expect(stamp.anchorMtimeMs).toBe(statSync(anchor).mtimeMs)
+  })
+
+  it('re-runs the full heal when the workspace lockfile changes after stamping', async () => {
+    const anchor = stageInstallation({ 'bundle-a': { patch: '[]\n' } })
+    const lockfile = join(dirname(dirname(dirname(anchor))), 'pnpm-lock.yaml')
+    writeFileSync(lockfile, 'locks\n')
+    const home = tmp()
+    await healProfilesModuleFallback({ installAnchor: anchor, home })
+    markStamp(home)
+    const touched = new Date(Date.now() + 60_000)
+    utimesSync(lockfile, touched, touched)
+    await healProfilesModuleFallback({ installAnchor: anchor, home })
+    expect(stampUntouched(home)).toBe(false)
+    const stamp = JSON.parse(readFileSync(stampPath(home), 'utf8')) as { lockfileMtimeMs: number }
+    expect(stamp.lockfileMtimeMs).toBe(statSync(lockfile).mtimeMs)
+  })
+
+  it('falls back to the full heal on a corrupt or wrong-shaped stamp', async () => {
+    const anchor = stageInstallation({ 'bundle-a': { patch: '[]\n' } })
+    const home = tmp()
+    await healProfilesModuleFallback({ installAnchor: anchor, home })
+    const fallback = join(home, 'profiles', 'node_modules')
+    const facts = (entries: unknown, packageNames: unknown, overrides: Record<string, unknown> = {}): string => {
+      const base: Record<string, unknown> = {
+        anchorMtimeMs: 1, anchorSize: 1, lockfileMtimeMs: null, lockfileSize: null, entries, packageNames,
+      }
+      return JSON.stringify({ ...base, ...overrides })
+    }
+    const variants = [
+      'not json{', // unparseable
+      'null', // parses, but not an object
+      '{}', // object without the stamp fields
+      facts('x', []), // entries not an array
+      facts([{ kind: 'symlink', packageName: 'dsh-app', packageDir: 3 }], []), // entry field wrong type
+      facts([{ kind: 'weird', packageName: 'dsh-app' }], []), // unknown entry kind
+      facts([{ kind: 'proxy', packageName: 'p', version: 1, targets: {} }], []), // proxy version not a string
+      facts([{ kind: 'proxy', packageName: 'p', version: '1', targets: { '.': 2 } }], []), // target not a string
+      facts([], 'x'), // packageNames not an array
+      facts([], [3]), // package name not a string
+      facts([], [], { anchorMtimeMs: null }), // shape-valid but null anchor mtime never matches a real stat
+    ]
+    for (const content of variants) {
+      writeFileSync(stampPath(home), content)
+      markStamp(home)
+      await healProfilesModuleFallback({ installAnchor: anchor, home })
+      expect(stampUntouched(home), content).toBe(false) // no usable stamp: full heal + rewrite
+      expect(lstatSync(join(fallback, 'dsh-app')).isSymbolicLink()).toBe(true)
+    }
+  })
+
+  it('repairs a stale link by falling through to the full heal', async () => {
+    const anchor = stageInstallation({ 'bundle-a': { patch: '[]\n' } })
+    const home = tmp()
+    await healProfilesModuleFallback({ installAnchor: anchor, home })
+    const fallback = join(home, 'profiles', 'node_modules')
+    rmSync(join(fallback, 'dsh-app'))
+    symlinkSync(tmp(), join(fallback, 'dsh-app'), 'junction')
+    markStamp(home)
+    await healProfilesModuleFallback({ installAnchor: anchor, home })
+    expect(stampUntouched(home)).toBe(false) // stale link: discovery rewrote the stamp
+    expect(readlinkSync(join(fallback, 'dsh-app'))).toBe(dirname(anchor))
+  })
+
+  it('re-runs discovery when a stamped target no longer exists (moved installation)', async () => {
+    const anchor = stageInstallation({ 'bundle-a': { patch: '[]\n', deps: { 'dep-of-a': '0.0.0' } } })
+    const modules = join(anchor, '..', 'node_modules')
+    mkdirSync(join(modules, 'dep-of-a'), { recursive: true })
+    writeFileSync(join(modules, 'dep-of-a', 'package.json'), JSON.stringify({ name: 'dep-of-a', version: '0.0.0' }))
+    const home = tmp()
+    await healProfilesModuleFallback({ installAnchor: anchor, home })
+    rmSync(join(modules, 'dep-of-a'), { recursive: true }) // the stamped target vanished
+    markStamp(home)
+    await healProfilesModuleFallback({ installAnchor: anchor, home })
+    expect(stampUntouched(home)).toBe(false) // target probe failed: full discovery
+    const fallback = join(home, 'profiles', 'node_modules')
+    expect(lstatSync(join(fallback, 'bundle-a')).isSymbolicLink()).toBe(true)
+    // dep-of-a stays declared-but-uninstalled: discovery skips it, its stale link dangles.
+    expect(lstatSync(join(fallback, 'dep-of-a')).isSymbolicLink()).toBe(true)
+    const stamp = JSON.parse(readFileSync(stampPath(home), 'utf8')) as { packageNames: string[] }
+    expect(stamp.packageNames).not.toContain('dep-of-a')
+  })
+
+  it('keeps a completed heal when the stamp cannot be written', async () => {
+    const anchor = stageInstallation({ 'bundle-a': { patch: '[]\n' } })
+    const home = tmp()
+    await healProfilesModuleFallback({ installAnchor: anchor, home })
+    const fallback = join(home, 'profiles', 'node_modules')
+    const touched = new Date(Date.now() + 60_000)
+    utimesSync(anchor, touched, touched) // forces discovery on the next heal
+    try {
+      chmodSync(fallback, 0o500)
+      await expect(healProfilesModuleFallback({ installAnchor: anchor, home })).resolves.toBeUndefined()
+    } finally {
+      chmodSync(fallback, 0o755)
+    }
+    expect(lstatSync(join(fallback, 'bundle-a')).isSymbolicLink()).toBe(true)
+  })
+
+  it('keeps a current generation when the stamp refresh lock cannot be acquired', async () => {
+    const anchor = stageInstallation({ 'bundle-a': { patch: '[]\n' } })
+    const home = tmp()
+    await healProfilesModuleFallback({ installAnchor: anchor, home })
+    const touched = new Date(Date.now() + 60_000)
+    utimesSync(anchor, touched, touched) // forces discovery; links stay current
+    try {
+      // The writer lock is a sibling of the fallback, so denying writes here
+      // fails only its acquisition, never the already-current generation.
+      chmodSync(join(home, 'profiles'), 0o500)
+      await expect(healProfilesModuleFallback({ installAnchor: anchor, home })).resolves.toBeUndefined()
+    } finally {
+      chmodSync(join(home, 'profiles'), 0o755)
+    }
+    expect(lstatSync(join(home, 'profiles', 'node_modules', 'bundle-a')).isSymbolicLink()).toBe(true)
   })
 })
