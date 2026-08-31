@@ -43,7 +43,7 @@ describe('SessionWriteBehind', () => {
   })
 
   it('retains a frozen event by reference and clones an unfrozen one', async () => {
-    const batches: SessionEvent[][] = []
+    const batches: (readonly SessionEvent[])[] = []
     const controller = new SessionWriteBehind({
       maxDelayMs: 200,
       write: async (events) => { batches.push(events) },
