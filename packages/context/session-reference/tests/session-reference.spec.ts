@@ -698,6 +698,88 @@ describe('session reference discovery and preparation', () => {
     expect(context.source).toMatchObject({ references: [{ truncated: true, compacted: true }] })
   })
 
+  it('retains a measured large conversation exactly to the budget in one arithmetic pass', async () => {
+    const messageCount = 240
+    const tailCount = 16
+    const checkpointHead = `checkpoint-head-${'h'.repeat(40)}`
+    const checkpointMid = `checkpoint-mid-${'m'.repeat(40)}`
+    const messageText = (index: number): string => `message-${index}-${'x'.repeat(48)}`
+    // The budget is exactly the pinned envelope: every state holding one more
+    // message is strictly larger, so retention must stop on precisely this set.
+    const expectedConversation = [
+      { role: 'user' as const, text: checkpointHead },
+      { role: 'user' as const, text: checkpointMid },
+      ...Array.from({ length: tailCount }, (_, k) => {
+        const index = messageCount - tailCount + k
+        return { role: index % 2 === 0 ? 'user' as const : 'assistant' as const, text: messageText(index) }
+      }),
+    ]
+    const expectedData = {
+      sessionId: 'source',
+      label: 'source',
+      cwd: null,
+      capturedThroughSeq: messageCount + 1,
+      conversation: expectedConversation,
+    }
+    const maxReferenceBytes = Buffer.byteLength(stringifyTagSafeJson(expectedData), 'utf8')
+    const ctx = await harness({ maxReferenceBytes })
+    const target = ctx.sessions.create(SessionId('target'))
+    const source = ctx.sessions.create(SessionId('source'))
+    source.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: checkpointHead }], source: checkpointSource('head'),
+    }), { surfaceOp: 'append' })
+    for (let index = 0; index < messageCount; index++) {
+      if (index === messageCount / 2) {
+        source.append('user/message', createUserMessage({
+          content: [{ type: 'text', text: checkpointMid }], source: checkpointSource('mid'),
+        }), { surfaceOp: 'append' })
+      }
+      const isUser = index % 2 === 0
+      if (isUser) {
+        source.append('user/message', createUserMessage({
+          content: [{ type: 'text', text: messageText(index) }], source: { kind: 'user' },
+        }), { surfaceOp: 'append' })
+      } else {
+        source.append('assistant/message', {
+          turn: 1,
+          step: 1,
+          message: createMessage({
+            role: 'assistant',
+            content: [{ type: 'text', text: messageText(index) }],
+            source: {
+              kind: 'model',
+              ...{ provider: 'mock', model: 'mock' },
+            },
+          }),
+        }, { surfaceOp: 'append' })
+      }
+    }
+
+    const prepared = await ctx.sessionReferenceResolver.prepare(
+      fakeAgent(target),
+      [{ type: 'text', text: 'go' }],
+      [{ sessionId: source.id }],
+    )
+    const context = prepared.additionalContext
+    if (context?.content[0]?.type !== 'text') throw new Error('expected text context')
+    const data = promptData(context.content[0].text) as unknown[]
+    expect(data).toEqual([expectedData])
+    // The exact-fit budget proves the byte accounting: no slack, no truncation notice.
+    expect(Buffer.byteLength(stringifyTagSafeJson(data[0]), 'utf8')).toBe(maxReferenceBytes)
+    const droppedBytes = Array.from({ length: messageCount - tailCount }, (_, k) => messageText(k).length)
+      .reduce((sum, length) => sum + length, 0)
+    expect(context.source).toMatchObject({
+      references: [{
+        compacted: true,
+        originalMessages: messageCount + 2,
+        retainedMessages: tailCount + 2,
+        omittedMessages: messageCount - tailCount,
+        omittedBytes: droppedBytes,
+        truncated: true,
+      }],
+    })
+  })
+
   it('applies the full byte limit independently to each of three references', async () => {
     const maxReferenceBytes = 360
     const ctx = await harness({ maxReferenceBytes })

@@ -11,6 +11,8 @@ interface ProjectedItem extends ReferencedConversationItem {
   checkpoint: boolean
   originalText: string
   omittedBytes: number
+  /** Serialized JSON-object bytes this entry contributes inside `conversation`. */
+  entryBytes: number
 }
 
 /** Snapshot data serialized inside the untrusted prompt. */
@@ -41,12 +43,12 @@ function projectSessionConversation(snapshot: SessionSurfaceSnapshot): Projected
         const checkpoint = isCompactCheckpointSource(event.data.source)
         if (!checkpoint && event.data.source.kind !== 'user') break
         const text = textContent(event.data.content)
-        if (text !== '') conversation.push({ role: 'user', text, checkpoint, originalText: text, omittedBytes: 0 })
+        if (text !== '') conversation.push(entry('user', text, checkpoint))
         break
       }
       case 'assistant/message': {
         const text = textContent(event.data.message.content)
-        if (text !== '') conversation.push({ role: 'assistant', text, checkpoint: false, originalText: text, omittedBytes: 0 })
+        if (text !== '') conversation.push(entry('assistant', text, false))
         break
       }
       case 'tool/result':
@@ -59,8 +61,37 @@ function projectSessionConversation(snapshot: SessionSurfaceSnapshot): Projected
   return conversation
 }
 
+/** One projected entry with its serialized byte cost computed once. */
+function entry(role: 'user' | 'assistant', text: string, checkpoint: boolean): ProjectedItem {
+  return {
+    role,
+    text,
+    checkpoint,
+    originalText: text,
+    omittedBytes: 0,
+    entryBytes: conversationItemBytes(role, text),
+  }
+}
+
+/**
+ * Serialized UTF-8 bytes of one conversation entry inside the rendered array.
+ * @param role - the entry's serialized `role` value.
+ * @param text - the entry's serialized `text` value.
+ * @returns the byte length of this entry's tag-safe JSON object serialization.
+ */
+function conversationItemBytes(role: 'user' | 'assistant', text: string): number {
+  return Buffer.byteLength(stringifyTagSafeJson({ role, text }), 'utf8')
+}
+
 /**
  * Fit one projected snapshot into an exact rendered JSON-object byte cap.
+ *
+ * Each conversation entry serializes independently, and the tag-safe `<`
+ * replacement is character-local, so the rendered size is exactly the
+ * empty-conversation envelope plus one comma and one entry payload per
+ * retained message. Entry costs are therefore measured once and the budget is
+ * applied arithmetically; the result is serialized once at the end to prove
+ * the cap instead of re-serializing the whole conversation per dropped message.
  * @param snapshot - current-surface source observation.
  * @param label - host-provided display label serialized with the source.
  * @param maxBytes - maximum UTF-8 bytes for the serialized data object.
@@ -72,32 +103,42 @@ export function retainReferencedSession(
   maxBytes: number,
 ): { data: ReferencedSessionData; stats: ReferenceRetentionStats } | undefined {
   const original = projectSessionConversation(snapshot)
-  const retained = original.map(item => ({ ...item }))
-  let omittedMessages = 0
-  let droppedOmittedBytes = 0
-  const data = (): ReferencedSessionData => ({
+  const newestIndex = original.length - 1
+  const fixed: ReferencedSessionData = {
     sessionId: snapshot.session.id,
     label,
     cwd: snapshot.session.cwd ?? null,
     capturedThroughSeq: snapshot.capturedThroughSeq,
+    conversation: [],
+  }
+  const fixedBytes = Buffer.byteLength(stringifyTagSafeJson(fixed), 'utf8')
+  const data = (retained: readonly ProjectedItem[]): ReferencedSessionData => ({
+    ...fixed,
     conversation: retained.map(({ role, text }) => ({ role, text })),
   })
-  const size = (): number => Buffer.byteLength(stringifyTagSafeJson(data()), 'utf8')
 
-  while (size() > maxBytes) {
-    const newestIndex = retained.length - 1
-    const dropIndex = retained.findIndex((item, index) => !item.checkpoint && index !== newestIndex)
-    if (dropIndex < 0) break
-    const removed = retained.splice(dropIndex, 1)[0]
-    /* v8 ignore next 3 -- dropIndex came from this exact array and is non-negative. */
-    if (removed === undefined) {
-      throw new Error('session-reference retention selected a missing message')
+  // Drop-from-front pass: while the running total over every undropped message
+  // exceeds the budget, drop the earliest droppable message. A message is
+  // droppable when it is neither a checkpoint nor the newest message; each drop
+  // removes its payload bytes and one comma.
+  const retained: ProjectedItem[] = []
+  let omittedMessages = 0
+  let droppedOmittedBytes = 0
+  let totalBytes = fixedBytes + Math.max(0, original.length - 1)
+    + original.reduce((sum, item) => sum + item.entryBytes, 0)
+  for (const [index, item] of original.entries()) {
+    if (totalBytes > maxBytes && !item.checkpoint && index !== newestIndex) {
+      totalBytes -= item.entryBytes + 1
+      omittedMessages += 1
+      droppedOmittedBytes += Buffer.byteLength(item.originalText, 'utf8')
+      continue
     }
-    omittedMessages += 1
-    droppedOmittedBytes += Buffer.byteLength(removed.originalText, 'utf8')
+    retained.push(item)
   }
 
-  while (size() > maxBytes) {
+  // Longest-message truncation pass for whatever checkpoints and newest
+  // messages the drop pass had to keep.
+  while (totalBytes > maxBytes) {
     let longestIndex = -1
     let longestBytes = 0
     for (const [index, item] of retained.entries()) {
@@ -108,7 +149,7 @@ export function retainReferencedSession(
       }
     }
     if (longestIndex < 0 || longestBytes === 0) return undefined
-    const overflow = size() - maxBytes
+    const overflow = totalBytes - maxBytes
     const target = Math.max(0, longestBytes - overflow)
     const item = retained[longestIndex]
     /* v8 ignore next 3 -- longestIndex was selected from this exact array's entries. */
@@ -118,14 +159,35 @@ export function retainReferencedSession(
     const shortened = truncateWithNotice(item.originalText, target)
     /* v8 ignore next -- strictly lowering the byte target must change a complete-string retention result. */
     if (shortened.text === retained[longestIndex]?.text) return undefined
-    retained[longestIndex] = { ...item, text: shortened.text, omittedBytes: shortened.omittedBytes }
+    const shortenedBytes = conversationItemBytes(item.role, shortened.text)
+    totalBytes += shortenedBytes - item.entryBytes
+    retained[longestIndex] = { ...item, text: shortened.text, omittedBytes: shortened.omittedBytes, entryBytes: shortenedBytes }
   }
+
+  const rendered = data(retained)
+  // Entry costs are exact for compositional JSON serialization, so the tracked
+  // total equals the serialized size and this cannot overshoot; one drop-and-
+  // re-verify round per remaining message bounds the guard without ever
+  // re-serializing per selection step.
+  /* v8 ignore start -- unreachable: the tracked total equals the serialized byte length. */
+  while (Buffer.byteLength(stringifyTagSafeJson(rendered), 'utf8') > maxBytes) {
+    const dropIndex = retained.findIndex((item, index) => !item.checkpoint && index !== retained.length - 1)
+    if (dropIndex < 0) return undefined
+    const removed = retained.splice(dropIndex, 1)[0]
+    if (removed === undefined) {
+      throw new Error('session-reference retention selected a missing message')
+    }
+    omittedMessages += 1
+    droppedOmittedBytes += Buffer.byteLength(removed.originalText, 'utf8')
+    rendered.conversation = retained.map(({ role, text }) => ({ role, text }))
+  }
+  /* v8 ignore stop */
 
   const compacted = original.some(item => item.checkpoint)
   const retainedOmittedBytes = retained.reduce((sum, item) => sum + item.omittedBytes, 0)
   const omittedBytes = retainedOmittedBytes + droppedOmittedBytes
   return {
-    data: data(),
+    data: rendered,
     stats: {
       compacted,
       originalMessages: original.length,
