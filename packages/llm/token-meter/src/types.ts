@@ -17,6 +17,15 @@ export type TokenMeasurementBaseline =
   | { readonly kind: 'estimated'; readonly tokens: number }
   | { readonly kind: 'usage'; readonly tokens: number; readonly usage: Readonly<TokenUsage> }
 
+/** Totals-only pressure reading for below-threshold gates that never select a surface range. */
+export interface TokenPressure {
+  /**
+   * Non-negative current request-and-response pressure, priced by the same
+   * replay fold and route pricing as {@link TokenMeasurement.totalTokens}.
+   */
+  readonly totalTokens: number
+}
+
 /** Detached immutable request-pressure and surface snapshot at one consumed log revision. */
 export interface TokenMeasurement {
   /** Number of durable events consumed; equal to the next unread event seq. */

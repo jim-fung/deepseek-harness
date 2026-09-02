@@ -296,6 +296,58 @@ describe('replay anchors and surface folds', () => {
     }).toThrow(TypeError)
   })
 
+  it('prices pressureOf exactly as measure at every baseline kind', () => {
+    const service = meter()
+
+    // No envelope and no surface: the `none` baseline.
+    const empty = Session.create(SessionId('pressure-empty'))
+    expect(service.pressureOf(empty)).toEqual({ totalTokens: 0 })
+    expect(service.pressureOf(empty).totalTokens).toBe(service.measure(empty).totalTokens)
+
+    // Estimated baseline: header plus surface, no anchor.
+    const estimated = Session.create(SessionId('pressure-estimated'))
+    estimated.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'a question for the meter' }],
+      source: { kind: 'user' },
+    }), { surfaceOp: 'append' })
+    appendHeader(estimated, header('deepseek-v4-flash'))
+    expect(service.pressureOf(estimated).totalTokens)
+      .toBe(service.measure(estimated).totalTokens)
+
+    // Usage-anchored baseline with a positive signed surface delta.
+    const usage = Session.create(SessionId('pressure-usage'))
+    usage.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'before' }],
+      source: { kind: 'user' },
+    }), { surfaceOp: 'append' })
+    appendSuccessfulCall(usage, header('deepseek-v4-flash'), {
+      providerText: 'short',
+      durableText: 'a much longer rewritten durable assistant answer',
+      usage: USAGE,
+    })
+    expect(service.pressureOf(usage).totalTokens).toBe(service.measure(usage).totalTokens)
+
+    // Estimated anchor with a negative signed delta after a shrink.
+    const shrunken = Session.create(SessionId('pressure-shrunken'))
+    const system = 'system context'
+    const requestHeader = header('deepseek-v4-flash', { system })
+    appendSuccessfulCall(shrunken, requestHeader, {
+      providerText: 'abcd'.repeat(512),
+      usage: { inputTokens: 20, outputTokens: 7 },
+    })
+    const anchored = service.measure(shrunken)
+    const assistant = anchored.nodes[0]!.seq
+    shrunken.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'short' }],
+      source: { kind: 'plugin', plugin: 'test' },
+    }), {
+      surfaceOp: { op: 'replace', start: assistant, end: assistant },
+      sourceEventSeqs: [assistant],
+    })
+    expect(service.pressureOf(shrunken).totalTokens)
+      .toBe(service.measure(shrunken).totalTokens)
+  })
+
   it('selects a heuristic anchor when provider usage would undercut its scale', () => {
     const service = meter()
     const session = Session.create(SessionId('low-usage-anchor'))

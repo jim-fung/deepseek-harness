@@ -17,13 +17,14 @@ import type {
   TokenMeasurement,
   TokenMeasurementBaseline,
   TokenMeterConfig,
+  TokenPressure,
 } from './types.ts'
 import { contextBreakdownProjectionDefinition } from './breakdown-projection.ts'
 import { contextPressureProjectionDefinition, tokenUsageProjectionDefinition } from './usage-projection.ts'
 import { estimateContent, estimateHeader, estimateMessage, ROLE_OVERHEAD } from './estimate.ts'
 import { commitSurfaceTokens, planSurfaceTokens } from './surface-fold.ts'
 import type { MeterSurfaceNode } from './surface-fold.ts'
-import { priceSurface } from './route-pricing.ts'
+import { priceSurface, priceSurfaceTotal } from './route-pricing.ts'
 
 export type * from './types.ts'
 // Module-edge re-export: forces the emitted index.d.ts to import the
@@ -137,34 +138,12 @@ export class TokenMeter extends Service {
       : canonicalHeader(requestHeader)
     const pricing = this._routeImagePricing(header)
     const surface = priceSurface(state.surface, pricing)
-    const anchor = state.anchor
-
-    let baseline: TokenMeasurementBaseline
-    let surfaceDeltaTokens: number
-    if (anchor !== undefined && optionalHeaderEquals(anchor.header, header)) {
-      // Matching headers share one route, so the anchored snapshot reprices
-      // under the same pricing as the current surface and the signed delta
-      // compares like with like.
-      const anchorSurfaceTokens = priceSurface(anchor.nodes, pricing).surfaceTokens
-        + anchor.assistantTokens
-      const estimatedAnchorTokens = estimateHeader(header) + anchorSurfaceTokens
-      const usage = anchor.usage
-      // Signed heuristic deltas remain conservative only from an anchor
-      // that is at least as large as the matching full heuristic price.
-      baseline = usage !== undefined && usageTokens(usage) >= estimatedAnchorTokens
-        ? { kind: 'usage', tokens: usageTokens(usage), usage }
-        : { kind: 'estimated', tokens: estimatedAnchorTokens }
-      surfaceDeltaTokens = surface.surfaceTokens - anchorSurfaceTokens
-    } else if (header === undefined && surface.surfaceTokens === 0) {
-      baseline = { kind: 'none', tokens: 0 }
-      surfaceDeltaTokens = 0
-    } else {
-      baseline = {
-        kind: 'estimated',
-        tokens: estimateHeader(header) + surface.surfaceTokens,
-      }
-      surfaceDeltaTokens = 0
-    }
+    const { baseline, surfaceDeltaTokens } = this._baselinePressure(
+      header,
+      state.anchor,
+      surface.surfaceTokens,
+      () => priceSurfaceTotal(state.anchor?.nodes ?? [], pricing),
+    )
 
     return deepFreeze(structuredClone({
       logRevision: state.consumedEvents,
@@ -174,6 +153,68 @@ export class TokenMeter extends Service {
       surfaceTokens: surface.surfaceTokens,
       nodes: surface.nodes,
     }))
+  }
+
+  /**
+   * Current request-and-response pressure through the same replay fold and
+   * route pricing as {@link measure} — for below-threshold gates that never
+   * select a surface range. Totals only: unlike {@link measure} this
+   * materializes no surface nodes, so a gate pays no O(surface) clone.
+   * @param session - session to replay through its current durable tail.
+   * @returns non-negative pressure priced exactly as {@link measure}'s `totalTokens`.
+   */
+  pressureOf(session: Session): TokenPressure {
+    const state = this._sync(session)
+    const pricing = this._routeImagePricing(state.header)
+    const surfaceTokens = priceSurfaceTotal(state.surface, pricing)
+    const { baseline, surfaceDeltaTokens } = this._baselinePressure(
+      state.header,
+      state.anchor,
+      surfaceTokens,
+      () => priceSurfaceTotal(state.anchor?.nodes ?? [], pricing),
+    )
+    return deepFreeze({ totalTokens: Math.max(0, baseline.tokens + surfaceDeltaTokens) })
+  }
+
+  /**
+   * Baseline pressure and signed surface delta shared by {@link measure} and
+   * {@link pressureOf} — one baseline implementation for both readers. The
+   * anchored branch re-guts the anchored snapshot through
+   * {@link repriceAnchorSurface} only when its header matches, so a mismatched
+   * header pays no anchor walk.
+   * @param header - effective envelope for this reading.
+   * @param anchor - the latest successful call's anchor, when one exists.
+   * @param surfaceTokens - current surface's route-priced total.
+   * @param repriceAnchorSurface - totals-only reprice of the anchor's node set under the same pricing.
+   * @returns the baseline and the signed current-surface delta.
+   */
+  private _baselinePressure(
+    header: EpochHeader | undefined,
+    anchor: MeasurementAnchor | undefined,
+    surfaceTokens: number,
+    repriceAnchorSurface: () => number,
+  ): { baseline: TokenMeasurementBaseline; surfaceDeltaTokens: number } {
+    if (anchor !== undefined && optionalHeaderEquals(anchor.header, header)) {
+      // Matching headers share one route, so the anchored snapshot reprices
+      // under the same pricing as the current surface and the signed delta
+      // compares like with like.
+      const anchorSurfaceTokens = repriceAnchorSurface() + anchor.assistantTokens
+      const estimatedAnchorTokens = estimateHeader(header) + anchorSurfaceTokens
+      const usage = anchor.usage
+      // Signed heuristic deltas remain conservative only from an anchor
+      // that is at least as large as the matching full heuristic price.
+      const baseline = usage !== undefined && usageTokens(usage) >= estimatedAnchorTokens
+        ? { kind: 'usage' as const, tokens: usageTokens(usage), usage }
+        : { kind: 'estimated' as const, tokens: estimatedAnchorTokens }
+      return { baseline, surfaceDeltaTokens: surfaceTokens - anchorSurfaceTokens }
+    }
+    if (header === undefined && surfaceTokens === 0) {
+      return { baseline: { kind: 'none', tokens: 0 }, surfaceDeltaTokens: 0 }
+    }
+    return {
+      baseline: { kind: 'estimated', tokens: estimateHeader(header) + surfaceTokens },
+      surfaceDeltaTokens: 0,
+    }
   }
 
   /** Resolve the routed model's image pricing, when the llm service and route declare one. */

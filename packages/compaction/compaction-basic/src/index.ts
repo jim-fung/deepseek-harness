@@ -8,7 +8,7 @@ import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { CompactionEngine, ManualCompactionError } from '@deepseek-ai/dsh-compaction'
 import type { CompactionResult, CompactionTrigger } from '@deepseek-ai/dsh-compaction'
-import type { TokenMeter } from '@deepseek-ai/dsh-token-meter'
+import type { TokenMeasurement, TokenMeter } from '@deepseek-ai/dsh-token-meter'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { CONTEXT_WINDOW_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
 import type { LlmCallConfig } from '@deepseek-ai/dsh-llm'
@@ -265,7 +265,8 @@ export class BasicCompactionEngine extends CompactionEngine {
     if (target === undefined) return null
     const policy = resolveTargetPolicy(this.config, target)
     const meter = this.ctx.tokenMeter
-    let measurement = meter.measure(agent.session)
+    let measurement: TokenMeasurement | undefined
+    if (trigger === 'context-overflow') measurement = meter.measure(agent.session)
     switch (trigger) {
       case 'context-overflow':
         break
@@ -294,15 +295,17 @@ export class BasicCompactionEngine extends CompactionEngine {
     const contextWindow = await this.requireContextWindow(target, signal)
     assertNoActiveCompaction(agent.session, 'automatic pressure compaction')
     const spec = resolveCompactSpec(policy, contextWindow)
-    if (measurement.totalTokens < spec.thresholdTokens) return null
+    // Below-threshold gates read totals only; the full surface materializes
+    // once a range must actually be selected.
+    if (meter.pressureOf(agent.session).totalTokens < spec.thresholdTokens) return null
 
     // Once pressure qualifies, land the model-free pass before choosing a
     // summary range, then remeasure through the singleton replay fold.
     if (prune !== undefined) {
       prune.pruneSession(agent.session)
-      measurement = meter.measure(agent.session)
+      if (meter.pressureOf(agent.session).totalTokens < spec.thresholdTokens) return null
     }
-    if (measurement.totalTokens < spec.thresholdTokens) return null
+    measurement = meter.measure(agent.session)
 
     let result: CompactionResult | null = null
     for (let attempt = 0; attempt <= spec.compactionRetries; attempt += 1) {
@@ -314,8 +317,8 @@ export class BasicCompactionEngine extends CompactionEngine {
         break
       }
       result = await this.compactRegion(range.start, range.end, agent, signal)
+      if (meter.pressureOf(agent.session).totalTokens < spec.thresholdTokens) return result
       measurement = meter.measure(agent.session)
-      if (measurement.totalTokens < spec.thresholdTokens) return result
     }
 
     throw new Error(
