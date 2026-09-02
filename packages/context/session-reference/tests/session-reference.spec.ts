@@ -288,9 +288,11 @@ describe('session reference discovery and preparation', () => {
       .rejects.toThrow(expectCode('SESSION_REFERENCE_INVALID_REFERENCE'))
 
     let releaseList: (() => void) | undefined
-    const listSessions = vi.spyOn(ctx.sessionQuery, 'listSessions').mockImplementationOnce(async () => {
+    // The revision probe is the listing's first awaited call now; hang it to
+    // hold the request open exactly where the old test hung listSessions.
+    const corpusRevision = vi.spyOn(ctx.sessionQuery, 'corpusRevision').mockImplementationOnce(async () => {
       await new Promise<void>((resolve) => { releaseList = resolve })
-      return []
+      return ''
     })
     const controller = new AbortController()
     const pending = ctx.sessionReferenceResolver.listCandidates(fakeAgent(target), '', undefined, controller.signal)
@@ -300,6 +302,31 @@ describe('session reference discovery and preparation', () => {
     await cancelledList
     releaseList?.()
     await Promise.resolve()
+    corpusRevision.mockRestore()
+  })
+
+  it('re-lists the store only when the corpus or a live title moves', async () => {
+    const ctx = await harness()
+    const target = ctx.sessions.create(SessionId('target'), { meta: { cwd: '/same' } })
+    const listSessions = vi.spyOn(ctx.sessionQuery, 'listSessions')
+
+    await ctx.sessionReferenceResolver.listCandidates(fakeAgent(target))
+    await ctx.sessionReferenceResolver.listCandidates(fakeAgent(target))
+    // The corpus fingerprint and live titles are unchanged: the second
+    // keystroke reuses the labeled listing without re-listing the store.
+    expect(listSessions).toHaveBeenCalledTimes(1)
+
+    // A corpus change (a new live session) invalidates the cache.
+    ctx.sessions.create(SessionId('newcomer'), { meta: { cwd: '/same' } })
+    await ctx.sessionReferenceResolver.listCandidates(fakeAgent(target))
+    expect(listSessions).toHaveBeenCalledTimes(2)
+
+    // A live rename also invalidates: labels must never go stale.
+    const live = ctx.sessions.get(SessionId('newcomer'))
+    if (live === undefined) throw new Error('live session missing')
+    live.append('session/title', { title: 'Named now', messageSeqs: [], source: { kind: 'user' } })
+    await ctx.sessionReferenceResolver.listCandidates(fakeAgent(target))
+    expect(listSessions).toHaveBeenCalledTimes(3)
     listSessions.mockRestore()
   })
 

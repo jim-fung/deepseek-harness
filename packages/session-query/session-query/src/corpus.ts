@@ -77,6 +77,17 @@ export class SessionCorpus {
   }
 
   /**
+   * Probe the persisted half's set fingerprint without listing; the live half
+   * is the caller's to fingerprint from `ctx.sessions`.
+   * @param signal - optional cancellation for the backend probe.
+   * @returns the backend fingerprint, or `undefined` when no backend is mounted.
+   */
+  async storeRevision(signal?: AbortSignal): Promise<string | undefined> {
+    const persistence = this._persistence
+    return persistence === undefined ? undefined : await probeStoreRevision(persistence, signal)
+  }
+
+  /**
    * Load one logical source, preferring a detached live snapshot.
    *
    * A known live target never consults persistence, so an optional backend's
@@ -259,6 +270,28 @@ async function listPersisted(
     if (signal?.aborted) signal.throwIfAborted()
     throw new SessionQueryError(
       `session persistence listing failed: ${errorMessage(error)}`,
+      'SESSION_QUERY_PERSISTENCE_FAILED',
+      { cause: error },
+    )
+  }
+}
+
+/**
+ * Probe the mounted backend's persisted-set fingerprint without listing.
+ * @param persistence - the mounted backend.
+ * @param signal - optional cancellation for the backend probe.
+ * @returns the backend's opaque set fingerprint.
+ */
+async function probeStoreRevision(
+  persistence: SessionPersistence,
+  signal?: AbortSignal,
+): Promise<string> {
+  try {
+    return await persistence.storeRevision(signal)
+  } catch (error: unknown) {
+    if (signal?.aborted) signal.throwIfAborted()
+    throw new SessionQueryError(
+      `session persistence revision probe failed: ${errorMessage(error)}`,
       'SESSION_QUERY_PERSISTENCE_FAILED',
       { cause: error },
     )

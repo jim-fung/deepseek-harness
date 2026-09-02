@@ -284,6 +284,22 @@ export class SqliteStore implements PersistenceBackend<number> {
     }))
   }
 
+  /**
+   * Cheap persisted-set fingerprint: the row count plus the row allocator's
+   * high-water mark, qualified by this store's identity. An insert moves both
+   * terms and a delete moves the count; a same-row revision update moves
+   * neither, matching the seam's set-sensitivity contract. One indexed
+   * aggregate instead of a per-session listing.
+   * @returns the store-qualified fingerprint.
+   */
+  storeRevision(): string {
+    const row = this.db.prepare(sql('select-store-revision')).get() as {
+      count: number
+      max_row_id: number
+    }
+    return `${this.storeIdentity}:${String(row.count)}:${String(row.max_row_id)}`
+  }
+
   async close(): Promise<void> {
     if (this.ready === undefined) {
       if (this.pathReady !== undefined) await Promise.allSettled([this.pathReady])

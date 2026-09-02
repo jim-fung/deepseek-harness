@@ -417,6 +417,27 @@ describe('JsonlSessionPersistence: durability and crash semantics', () => {
     await otherCtx.fiber.dispose()
   })
 
+  it('tracks the persisted set in storeRevision without per-session reads', async () => {
+    const baseline = await ctx.sessionPersistence.storeRevision()
+    expect(baseline).not.toBe('empty')
+
+    // Materializing one session moves the fingerprint (create alone is lazy
+    // and leaves nothing on disk); it stabilizes again while nothing changes.
+    const added = meta('revision-probe')
+    await ctx.sessionPersistence.create(added)
+    await ctx.sessionPersistence.append(added.id, oneTurnLog())
+    const withSession = await ctx.sessionPersistence.storeRevision()
+    expect(withSession).not.toBe(baseline)
+    await expect(ctx.sessionPersistence.storeRevision()).resolves.toBe(withSession)
+
+    // Removing it returns a fingerprint distinct from both prior readings.
+    const located = ctx.sessionPersistence.locate(added)
+    if (located?.kind !== 'jsonl') throw new Error('expected a jsonl artifact location')
+    await rm(dirname(dirname(located.path)), { recursive: true, force: true })
+    const afterRemoval = await ctx.sessionPersistence.storeRevision()
+    expect(afterRemoval).not.toBe(withSession)
+  })
+
   it('binds a full stored prefix to the same revision as a lightweight read', async () => {
     const m = meta('stored-prefix-revision')
     await ctx.sessionPersistence.create(m)

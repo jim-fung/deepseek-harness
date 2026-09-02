@@ -281,6 +281,23 @@ export abstract class SessionPersistence extends Service {
    * @returns one header and opaque revision per materialized session without loading full logs.
    */
   abstract listSnapshots(signal?: AbortSignal): Promise<SessionPersistenceSnapshot[]>
+
+  /**
+   * Cheap fingerprint of the persisted session set, for change detection that
+   * must not pay a per-session listing. It changes whenever a session is
+   * created or removed and never compares equal across different stores;
+   * whether it also changes when one log's content grows is backend-owned —
+   * callers invalidating derived listings must not assume content
+   * sensitivity. The default observes every log's snapshot revision, so it
+   * costs O(sessions) stats; backends override it with a genuinely cheaper
+   * probe.
+   * @param signal - optional cancellation for backend probing work.
+   * @returns an opaque fingerprint that is stable while the observed set is unchanged.
+   */
+  async storeRevision(_signal?: AbortSignal): Promise<string> {
+    const snapshots = await this.listSnapshots(_signal)
+    return snapshots.map(snapshot => snapshot.revision).sort().join('|')
+  }
 }
 
 export default SessionPersistence

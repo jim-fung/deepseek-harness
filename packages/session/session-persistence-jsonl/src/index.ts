@@ -9,6 +9,7 @@
 import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { readdirSync } from 'node:fs'
+import type { Dirent } from 'node:fs'
 import { open, mkdir, readFile, readdir, realpath, link, rm, stat, truncate } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
@@ -499,6 +500,47 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
     }
     signal?.throwIfAborted()
     return snapshots
+  }
+
+  /**
+   * Set-membership fingerprint over the store's directory tree: project and
+   * session directory names plus their parent-directory mtimes. Adding or
+   * removing a session directory updates its project directory's mtime, so
+   * every set change moves the fingerprint while the probe costs
+   * O(project directories) readdirs instead of a per-session header read.
+   * Content growth inside one log changes no directory mtime, matching the
+   * seam's set-sensitivity contract.
+   */
+  override async storeRevision(signal?: AbortSignal): Promise<string> {
+    signal?.throwIfAborted()
+    const parts: string[] = []
+    let rootEntries: Dirent[]
+    try {
+      rootEntries = await readdir(this.root, { withFileTypes: true })
+      const rootIdentity = await stat(this.root)
+      parts.push(`root:${rootIdentity.mtimeMs}:${rootEntries.map(entry => entry.name).sort().join(',')}`)
+    } catch (error: unknown) {
+      if (isENOENT(error)) return 'empty'
+      throw error
+    }
+    for (const project of rootEntries) {
+      if (!project.isDirectory()) continue
+      signal?.throwIfAborted()
+      const projectPath = join(this.root, project.name)
+      try {
+        const [entries, identity] = await Promise.all([
+          readdir(projectPath, { withFileTypes: true }),
+          stat(projectPath),
+        ])
+        parts.push(`${project.name}:${identity.mtimeMs}:${entries.map(entry => entry.name).sort().join(',')}`)
+      } catch (error: unknown) {
+        // A project directory that vanished mid-probe is the removal the
+        // next observation will see; skip it instead of failing the probe.
+        if (isENOENT(error)) continue
+        throw error
+      }
+    }
+    return parts.join('\n')
   }
 
   private async listArtifacts(signal?: AbortSignal): Promise<Array<{ header: SessionHeader; path: string }>> {

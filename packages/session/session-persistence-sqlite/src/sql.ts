@@ -32,6 +32,7 @@ const SQL_RESOURCES = [
   'select-session-key',
   'select-sessions',
   'select-store-id',
+  'select-store-revision',
   'select-synchronous',
   'select-tail-events',
   'select-trusted-schema',

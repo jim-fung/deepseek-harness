@@ -139,6 +139,10 @@ export class SqliteSessionPersistence extends SessionPersistence {
   listSnapshots(signal?: AbortSignal): Promise<SessionPersistenceSnapshot[]> {
     return this.store.listSnapshots(signal)
   }
+
+  override storeRevision(): Promise<string> {
+    return Promise.resolve(this.store.storeRevision())
+  }
 }
 
 export default SqliteSessionPersistence

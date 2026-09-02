@@ -143,7 +143,7 @@ function expectCode(code: SessionQueryErrorCode): Error {
 
 function rejectUnknown<T>(reason: unknown): Promise<T> {
   // Exercise containment for an implementation that violates the Error rejection convention.
-  return Promise.reject(reason) // oxlint-disable-line typescript/prefer-promise-reject-errors
+  return Promise.reject(reason)
 }
 
 const cancellableSessionListings = [
@@ -1231,5 +1231,32 @@ describe('session-query exact reads', () => {
     release()
     await disposing
     await persistence.dispose()
+  })
+})
+
+describe('session-query corpus revision', () => {
+  it('fingerprints live ids plus the persisted set without listing', async () => {
+    TestPersistence.reset()
+    const ctx = await liveContext()
+    await ctx.plugin(TestPersistence)
+
+    // No live sessions and no persisted entries: empty halves on both sides.
+    const empty = await ctx.sessionQuery.corpusRevision()
+    expect(empty).toBe('|')
+    await expect(ctx.sessionQuery.corpusRevision()).resolves.toBe(empty)
+
+    // Creating a live session moves the live half, exact by id.
+    ctx.sessions.create(SessionId('live-one'), { meta: { cwd: '/w' } })
+    const withLive = await ctx.sessionQuery.corpusRevision()
+    expect(withLive).toBe('live-one|')
+
+    // Materializing a persisted session moves the persisted half.
+    TestPersistence.reset([{ meta: header('persisted-one', 1), events: eventLog('persisted-one') }])
+    const withPersisted = await ctx.sessionQuery.corpusRevision()
+    expect(withPersisted).not.toBe(withLive)
+    expect(withPersisted.startsWith('live-one|')).toBe(true)
+    expect(withPersisted.endsWith('|')).toBe(false)
+
+    await ctx.fiber.dispose()
   })
 })

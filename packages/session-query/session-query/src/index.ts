@@ -157,6 +157,21 @@ export abstract class SessionQueryEngine extends Service {
   }
 
   /**
+   * Cheap fingerprint of the whole logical corpus, for invalidating derived
+   * listings without re-listing. The live half is exact (one id per live
+   * session); the persisted half is the backend's {@link SessionPersistence.storeRevision}
+   * set fingerprint, which changes when sessions are created or removed and
+   * may not move when one stored log's content grows. `no-persistence` when
+   * no backend is mounted.
+   * @param signal - optional cancellation for the persistence probe.
+   * @returns a corpus fingerprint that is stable while the observed corpus is unchanged.
+   */
+  async corpusRevision(signal?: AbortSignal): Promise<string> {
+    const liveIds = this.ctx.sessions.list().map(session => session.id).sort().join(',')
+    return `${liveIds}|${await this._corpus.storeRevision(signal)}`
+  }
+
+  /**
    * Read and replay-validate one complete logical session log without making it live.
    * @param sessionId - live or persisted session id to read.
    * @returns cloned header and complete raw event log from one observation.
