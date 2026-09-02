@@ -11,7 +11,7 @@
  * @module @deepseek-ai/dsh/profile-boot
  */
 
-import { writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { FiberState, type Context } from '@deepseek-ai/cordis'
@@ -117,7 +117,13 @@ export function resolveTelemetryPatch(disabledEnv: string | undefined, hasRow: b
  */
 export function prepareProfile(name: string, userLayer = true): Profile {
   const profile = loadProfile(NAME, name, INSTALL_ANCHOR, undefined, { userLayer })
-  writeFileSync(join(profile.dir, PROFILE_ROOT_FILENAME), PROFILE_ROOT_CONFIG)
+  const rootPath = join(profile.dir, PROFILE_ROOT_FILENAME)
+  // The rewrite exists to undo Loader write-back; when the file already holds
+  // the empty root, rewriting it is a synchronous write on every launch for
+  // nothing. Absence falls through to the write (a fresh profile dir).
+  if (!existsSync(rootPath) || readFileSync(rootPath, 'utf8') !== PROFILE_ROOT_CONFIG) {
+    writeFileSync(rootPath, PROFILE_ROOT_CONFIG)
+  }
   return profile
 }
 
