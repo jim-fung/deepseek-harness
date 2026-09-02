@@ -256,6 +256,32 @@ function expandProvenanceFromStorage(parsed: unknown): unknown {
   return { ...record, sourceEventSeqs: decodeSeqRanges(record.sourceEventSeqs, record.seq as number) }
 }
 
+/**
+ * Cheap first/last seq span of one parsed storage record, without decoding it.
+ * Packed rows span `seq0` through their member count; events carry a single
+ * `seq`. `undefined` when the shape does not cheaply declare a span — the
+ * caller then falls back to the full record decode, which owns the proper
+ * corruption diagnostics.
+ * @param parsed - the JSON-parsed value of one stored line.
+ * @returns the inclusive seq span, or `undefined` when it cannot be read cheaply.
+ */
+function storedRecordSeqSpan(parsed: unknown): { first: number; last: number } | undefined {
+  if (typeof parsed !== 'object' || parsed === null) return undefined
+  const record = parsed as { seq?: unknown; type?: unknown; seq0?: unknown; data?: unknown }
+  if (record.type === 'text-chunks' || record.type === 'reasoning-chunks' || record.type === 'tool-call-chunks') {
+    if (typeof record.seq0 !== 'number' || !Number.isSafeInteger(record.seq0)) return undefined
+    if (typeof record.data !== 'object' || record.data === null) return undefined
+    const data = record.data as { texts?: unknown; args?: unknown }
+    const members = Array.isArray(data.texts)
+      ? data.texts.length
+      : Array.isArray(data.args) ? data.args.length : undefined
+    if (members === undefined) return undefined
+    return { first: record.seq0, last: record.seq0 + members - 1 }
+  }
+  if (typeof record.seq !== 'number' || !Number.isSafeInteger(record.seq)) return undefined
+  return { first: record.seq, last: record.seq }
+}
+
 interface SessionLogScan {
   meta: SessionHeader
   events: SessionEvent[]
@@ -305,6 +331,8 @@ function parseHeaderRecord(record: Buffer): SessionHeader {
 export class SessionLogScanner {
   private readonly meta: SessionHeader
   private readonly events: SessionEvent[] = []
+  private readonly fromSeq: number
+  private nextSeq = 0
   private fragments: Buffer[] = []
   private fragmentBytes = 0
   private inputBytes: number
@@ -316,9 +344,14 @@ export class SessionLogScanner {
   /**
    * Create an event scanner from exactly one newline-terminated header record.
    * @param headerRecord - the complete first JSONL record, including its newline.
+   * @param fromSeq - first event seq the caller needs; complete records wholly
+   *   below it skip the full record decode, their validation limited to seq
+   *   contiguity by the suffix-read contract. Only events at or above the
+   *   floor are retained.
    */
-  constructor(headerRecord: Buffer) {
+  constructor(headerRecord: Buffer, fromSeq = 0) {
     this.meta = parseHeaderRecord(headerRecord)
+    this.fromSeq = fromSeq
     this.inputBytes = headerRecord.length
     this.committedBytes = headerRecord.length
   }
@@ -379,9 +412,31 @@ export class SessionLogScanner {
   /** Decode one complete event row and update the contiguous prefix. */
   private consumeEventLine(line: Buffer, endByte: number): void {
     this.eventLine += 1
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(line.toString('utf8'))
+    } catch {
+      this.issue ??= new Error(`corrupt session log: unparsable committed event at line ${this.eventLine}`)
+      return
+    }
+    if (this.fromSeq > 0) {
+      const span = storedRecordSeqSpan(parsed)
+      if (span !== undefined && span.last < this.fromSeq) {
+        if (span.first !== this.nextSeq) {
+          this.issue ??= new Error(
+            `corrupt session log: seq gap in committed region at line ${this.eventLine} `
+            + `(expected ${this.nextSeq}, got ${span.first})`,
+          )
+          return
+        }
+        this.nextSeq = span.last + 1
+        this.committedBytes = endByte
+        return
+      }
+    }
     let decoded: SessionEvent[]
     try {
-      decoded = decodeStorageRecord(expandProvenanceFromStorage(JSON.parse(line.toString('utf8'))))
+      decoded = decodeStorageRecord(expandProvenanceFromStorage(parsed))
     } catch {
       this.issue ??= new Error(`corrupt session log: unparsable committed event at line ${this.eventLine}`)
       return
@@ -393,10 +448,12 @@ export class SessionLogScanner {
     }
 
     const rowStart = this.events.length
+    const rowNextSeq = this.nextSeq
     for (const event of decoded) {
-      if (event.seq !== this.events.length) {
-        const expected = this.events.length
+      if (event.seq !== this.nextSeq) {
+        const expected = this.nextSeq
         this.events.length = rowStart
+        this.nextSeq = rowNextSeq
         this.issue = new Error(
           `corrupt session log: seq gap in committed region at line ${this.eventLine} `
           + `(expected ${expected}, got ${event.seq})`,
@@ -404,7 +461,8 @@ export class SessionLogScanner {
         if (decoded.some(candidate => candidate.type === 'turn/end')) throw this.issue
         return
       }
-      this.events.push(event)
+      this.nextSeq += 1
+      if (event.seq >= this.fromSeq) this.events.push(event)
     }
     this.committedBytes = endByte
   }

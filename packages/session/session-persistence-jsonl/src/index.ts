@@ -22,7 +22,7 @@ import {
   type PersistenceBackend, type SessionLocation, type SessionPersistenceSnapshot,
   type SessionInspection,
   type SessionPersistenceRevision as PersistenceRevision, type SessionRawArtifact,
-  type StoredPrefix, type StoredRevisionHint,
+  type StoredPrefix, type StoredRevisionHint, type StoredSuffix,
 } from '@deepseek-ai/dsh-session-persistence'
 import type { Session, SessionEvent, SessionId, SessionHeader, SessionPreparation } from '@deepseek-ai/dsh-session'
 import {
@@ -204,10 +204,108 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
     return this.coordinator.borrowSession(id, signal)
   }
 
-  // JSONL is sequential media: no loadStoredFrom hook, so the coordinator
-  // parses the stored prefix (both encodings) and skips forward to fromSeq.
+  // Frames are independently decodable, so readFrom skips the full record
+  // decode for complete records below fromSeq instead of parsing the whole
+  // stored prefix and skipping forward.
   readFrom(id: SessionId, fromSeq: number, signal?: AbortSignal): Promise<{ meta: SessionHeader; events: SessionEvent[] }> {
     return this.coordinator.readFrom(id, fromSeq, signal)
+  }
+
+  /**
+   * Seek-capable suffix read: decode every frame (forward scanning needs no
+   * index) but skip the full record decode for complete records wholly below
+   * `fromSeq` — the suffix contract scopes their validation to seq
+   * contiguity. Non-mutating, and a torn final frame contributes nothing:
+   * the committed prefix is exactly what the whole-prefix fallback would
+   * return for the same file.
+   * @param id - persisted session to resolve.
+   * @param fromSeq - first event seq to include.
+   * @param signal - optional cancellation for backend read work.
+   * @returns the header and stored events with `seq >= fromSeq`, or `undefined` when absent.
+   */
+  async loadStoredFrom(id: SessionId, fromSeq: number, signal?: AbortSignal): Promise<StoredSuffix | undefined> {
+    signal?.throwIfAborted()
+    const path = await this.findLog(id, signal)
+    if (path === undefined) return undefined
+    const { buffer } = await this.readStableFile(path, signal)
+    let suffix: { meta: SessionHeader; events: SessionEvent[] }
+    try {
+      suffix = this.compression === 'zstd'
+        ? await this.readZstdSuffix(buffer, fromSeq, signal)
+        : this.readPlainSuffix(buffer, fromSeq)
+    } catch (error: unknown) {
+      // A parse-time format refusal predates any SessionHeader, so the
+      // coordinator's locate-based enrichment cannot run; attach the artifact
+      // this read actually refused.
+      if (error instanceof SessionFormatUnsupportedError && error.location === undefined) {
+        throw new SessionFormatUnsupportedError(`${error.message} (raw log: ${path})`, { kind: 'jsonl', path })
+      }
+      throw error
+    }
+    signal?.throwIfAborted()
+    await this.assertStoredIdentity(path, suffix.meta, id, signal)
+    signal?.throwIfAborted()
+    return { meta: suffix.meta, events: suffix.events }
+  }
+
+  /** Scan a plaintext log's committed records from `fromSeq`. */
+  private readPlainSuffix(buffer: Buffer, fromSeq: number): { meta: SessionHeader; events: SessionEvent[] } {
+    const headerEnd = buffer.indexOf(0x0A)
+    if (headerEnd === -1) throw new Error('empty or header-less session log')
+    const scanner = new SessionLogScanner(buffer.subarray(0, headerEnd + 1), fromSeq)
+    scanner.write(buffer.subarray(headerEnd + 1))
+    return scanner.finish()
+  }
+
+  /** Decode a Zstandard log's complete frames and scan their records from `fromSeq`. */
+  private async readZstdSuffix(
+    buffer: Buffer,
+    fromSeq: number,
+    signal?: AbortSignal,
+  ): Promise<{ meta: SessionHeader; events: SessionEvent[] }> {
+    signal?.throwIfAborted()
+    const { frames } = scanZstdFrames(buffer)
+    signal?.throwIfAborted()
+    if (frames.length === 0) throw new Error('empty or header-less Zstandard session log')
+
+    const decoder = createZstdFrameDecoder()
+    let yieldDeadline = performance.now() + ZSTD_DECODE_YIELD_INTERVAL_MS
+    try {
+      const decodedFrames = decoder.decode(buffer, frames)
+      signal?.throwIfAborted()
+      const headerFrame = decodedFrames.next()
+      signal?.throwIfAborted()
+      /* v8 ignore next -- a non-empty structural frame list makes the decoder yield its first frame or throw. */
+      if (headerFrame.done) throw new Error('empty or header-less Zstandard session log')
+      assertZstdHeaderFrame(headerFrame.value)
+      const scanner = new SessionLogScanner(headerFrame.value, fromSeq)
+
+      let remainingFrames = frames.length - 1
+      for (const plaintext of decodedFrames) {
+        signal?.throwIfAborted()
+        scanner.write(plaintext)
+        remainingFrames -= 1
+        if (remainingFrames > 0 && performance.now() >= yieldDeadline) {
+          await scheduler.yield()
+          signal?.throwIfAborted()
+          yieldDeadline = performance.now() + ZSTD_DECODE_YIELD_INTERVAL_MS
+        }
+      }
+      signal?.throwIfAborted()
+      const complete = scanner.checkpoint()
+      if (complete.committedBytes !== complete.inputBytes) {
+        throw new Error('corrupt Zstandard session log: complete frame contains a torn JSONL record')
+      }
+      // A torn final frame contributes nothing to a non-mutating suffix read;
+      // its bytes stay exactly where they are.
+      return scanner.finish()
+    } catch (error) {
+      /* v8 ignore next -- decoder failure plus concurrent abort is timing-dependent */
+      if (signal?.aborted) signal.throwIfAborted()
+      throw error
+    } finally {
+      decoder.close()
+    }
   }
 
   // One method serves both public `list` and the backend hook; delegating it to
@@ -218,8 +316,6 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
 
   /** Read a stored prefix by id across all project directories when cwd is unknown. */
   async loadStored(id: SessionId, signal?: AbortSignal): Promise<StoredPrefix<JsonlTornMarker> | undefined> {
-    signal?.throwIfAborted()
-    await this.ensureRootEncoding()
     signal?.throwIfAborted()
     const path = await this.findLog(id, signal)
     if (path === undefined) return undefined
@@ -238,8 +334,6 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
     signal?: AbortSignal,
     hint?: StoredRevisionHint,
   ): Promise<PersistenceRevision | undefined> {
-    signal?.throwIfAborted()
-    await this.ensureRootEncoding()
     signal?.throwIfAborted()
     if (hint !== undefined) {
       const hinted = await this.statRevision(logPath(this.root, hint.cwd, id, this.compression), signal)
@@ -277,8 +371,6 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
    * line, or `undefined` when the session has no stored artifact.
    */
   override async readRaw(id: SessionId, signal?: AbortSignal): Promise<SessionRawArtifact | undefined> {
-    signal?.throwIfAborted()
-    await this.ensureRootEncoding()
     signal?.throwIfAborted()
     const path = await this.findLog(id, signal)
     if (path === undefined) return undefined

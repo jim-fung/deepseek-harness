@@ -8,7 +8,7 @@ import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { CompactionEngine, ManualCompactionError } from '@deepseek-ai/dsh-compaction'
 import type { CompactionResult, CompactionTrigger } from '@deepseek-ai/dsh-compaction'
-import type { TokenMeasurement, TokenMeter } from '@deepseek-ai/dsh-token-meter'
+import type { TokenMeter } from '@deepseek-ai/dsh-token-meter'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { CONTEXT_WINDOW_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
 import type { LlmCallConfig } from '@deepseek-ai/dsh-llm'
@@ -265,8 +265,6 @@ export class BasicCompactionEngine extends CompactionEngine {
     if (target === undefined) return null
     const policy = resolveTargetPolicy(this.config, target)
     const meter = this.ctx.tokenMeter
-    let measurement: TokenMeasurement | undefined
-    if (trigger === 'context-overflow') measurement = meter.measure(agent.session)
     switch (trigger) {
       case 'context-overflow':
         break
@@ -283,11 +281,9 @@ export class BasicCompactionEngine extends CompactionEngine {
     const prune = this.ctx.get('toolResultPruner')
 
     if (trigger === 'context-overflow') {
-      if (prune !== undefined) {
-        prune.pruneSession(agent.session)
-        measurement = meter.measure(agent.session)
-      }
-      const range = selectCompactableRange(agent.session, measurement, 0)
+      if (prune !== undefined) prune.pruneSession(agent.session)
+      const overflowMeasurement = meter.measure(agent.session)
+      const range = selectCompactableRange(agent.session, overflowMeasurement, 0)
       if (range === null) return null
       return this.compactRegion(range.start, range.end, agent, signal)
     }
@@ -305,7 +301,7 @@ export class BasicCompactionEngine extends CompactionEngine {
       prune.pruneSession(agent.session)
       if (meter.pressureOf(agent.session).totalTokens < spec.thresholdTokens) return null
     }
-    measurement = meter.measure(agent.session)
+    let measurement = meter.measure(agent.session)
 
     let result: CompactionResult | null = null
     for (let attempt = 0; attempt <= spec.compactionRetries; attempt += 1) {

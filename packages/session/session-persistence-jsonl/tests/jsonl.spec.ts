@@ -438,6 +438,45 @@ describe('JsonlSessionPersistence: durability and crash semantics', () => {
     expect(afterRemoval).not.toBe(withSession)
   })
 
+  it('serves a suffix spanning a packed chunk row without rewriting the log', async () => {
+    const zctx = new Context()
+    const zroot = await freshRoot()
+    await zctx.plugin(SessionStore)
+    await zctx.plugin(JsonlSessionPersistence, { root: zroot, compression: 'zstd' })
+    try {
+      const m = meta('suffix-packed', '/work')
+      await zctx.sessionPersistence.create(m)
+      // Three frames; the middle append is a packed chunk run whose members
+      // straddle the requested floor.
+      await zctx.sessionPersistence.append(m.id, oneTurnLog())
+      const chunkBatch: SessionEvent[] = [6, 7, 8, 9].map((seq, index) => ({
+        type: 'assistant/chunk',
+        seq,
+        time: 100 + index,
+        data: { turn: 1, step: 1, chunk: { type: 'text-delta', index, text: `t${index}` } },
+      }))
+      await zctx.sessionPersistence.append(m.id, chunkBatch)
+      await zctx.sessionPersistence.append(m.id, [{ type: 'step/end', seq: 10, time: 200, data: { turn: 1, step: 1 } }])
+
+      const logPath = (zctx.sessionPersistence.locate(m) as { kind: 'jsonl'; path: string }).path
+      const before = await stat(logPath)
+
+      // Floor 8 lands inside the packed row (seqs 6-9): the suffix must
+      // reconstruct members 8 and 9 exactly.
+      const whole = await zctx.sessionPersistence.readFrom(m.id, 0)
+      const suffix = await zctx.sessionPersistence.readFrom(m.id, 8)
+      expect(suffix.events.map(event => event.seq)).toEqual([8, 9, 10])
+      expect(suffix.events).toEqual(whole.events.filter(event => event.seq >= 8))
+      expect(suffix.meta).toEqual(whole.meta)
+
+      const after = await stat(logPath)
+      expect(after.size).toBe(before.size)
+      expect(after.mtimeMs).toBe(before.mtimeMs)
+    } finally {
+      await zctx.fiber.dispose()
+    }
+  })
+
   it('binds a full stored prefix to the same revision as a lightweight read', async () => {
     const m = meta('stored-prefix-revision')
     await ctx.sessionPersistence.create(m)
