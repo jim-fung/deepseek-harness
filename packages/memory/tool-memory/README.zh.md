@@ -1,9 +1,27 @@
+---
+description: "记忆能力 seam 的面向模型消费方：注册 memory_save、memory_search、memory_forget 三个工具、指导性系统提示词节与召回节；执行经由 ctx.memory，从不触及提供方选择或网络访问。"
+kind: "package-reference"
+---
+
 # @deepseek-ai/dsh-tool-memory
 
 [English](README.md) | 中文
 
+## 概述
+
 [记忆能力 seam](../memory/README.zh.md) 的面向模型消费方：注册 `memory_save`、`memory_search`、`memory_forget` 三个工具、一段指导性系统提示词节，以及把用户记忆画像注入每次组装提示词的召回节。执行经由 `ctx.memory`；本包持有 schema、校验、指导文案与召回，从不触及提供方选择或网络访问。
 
+## 目录
+
+- [工具](#tools)
+- [自动召回](#recall)
+- [模型体验](#model-experience)
+- [已知限制与暂缓事项](#known-limitations-and-deferred-work)
+- [开发备注](#dev-note)
+
+-----
+
+<a id="tools"></a>
 ## 工具
 
 | 工具 | 参数 | 说明 |
@@ -14,10 +32,12 @@
 
 配置开关 `save`、`searchAndForget` 与 `recall`（均默认 `true`）选择工具族与召回节；指导节 `tool:memory`（order 120）在任一工具族启用时注册。项目 scope id 在执行时从进程工作目录派生（包含 `.git` 的最近祖先目录，否则为工作目录本身）；scope 取值不是 `project` 或 `global` 时抛出 `MemoryError`，code 为 `MEMORY_REQUEST_INVALID`。提供方不可用时，已启用的工具仍然可见，并在执行时以结构化错误失败。
 
+<a id="recall"></a>
 ## 自动召回
 
 `system-prompt/assemble` 瀑布监听器先等待 `next()`，再获取 `ctx.memory.profile()`，并在全部有序节之后追加节 `memory-profile`（`MEMORY_PROFILE_SECTION_NAME`），因此在拼接后的提示词中渲染在最后。空画像不产生节；召回的任何失败降级为一条警告日志并省略该节——不可达的记忆服务不得拖垮会话。组装节是组装结果的一部分，因此注入文本始终可以从会话日志重建。
 
+<a id="model-experience"></a>
 ## 模型体验
 
 ### 指导系统提示词
@@ -69,6 +89,17 @@ Persistent memory spans sessions. When the user asks you to remember something, 
 该节属于请求前缀，因此组装之间变化的画像会使下一次请求起的复用失效；画像不变时它是稳定的重复前缀。
 
 ## 已知限制与暂缓事项
+<a id="known-limitations-and-deferred-work"></a>
 
 - **每次组装只追加一个静态召回节**：该节反映组装时获取的画像；会话中途没有增量更新。
 - **项目 scope 在执行时从进程 cwd 派生**：会话在两次调用之间改变工作目录时会寻址不同的项目分区。
+
+<a id="dev-note"></a>
+### 开发备注
+
+<details>
+<summary>维护者工作背景 — 点击展开</summary>
+
+本包只持有 schema、校验、指导文案与召回；提供方选择与网络访问留在 `ctx.memory` 及其提供方包之后。指导文案、工具 schema 与召回节是模型可见表层，因此此处的修改会从下一次组装起改变组装出的请求前缀。
+
+</details>

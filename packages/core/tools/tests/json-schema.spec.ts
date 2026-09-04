@@ -65,6 +65,14 @@ describe('the enforced raw JSON Schema subset', () => {
       },
       { oneOf: [{ type: 'string' }, { type: 'number' }] },
       { description: 'any JSON', title: 'JSON', default: null, examples: [1, 'x'] },
+      // The official MCP SDK stamps this dialect URI on every zod-derived tool schema.
+      {
+        $schema: 'http://json-schema.org/draft-07/schema#',
+        type: 'object',
+        properties: { a: { type: 'number', description: 'First number' } },
+        required: ['a'],
+      },
+      { oneOf: [{ type: 'string' }, { type: 'number' }], $schema: 'http://json-schema.org/draft-07/schema#' },
     ]) {
       expect(() => { assertSupportedJsonSchema(schema) }, JSON.stringify(schema)).not.toThrow()
     }

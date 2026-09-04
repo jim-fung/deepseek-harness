@@ -1,8 +1,27 @@
+---
+description: "可选的 dsh 托管记忆 profile 组合包：持久记忆存储在 supermemory.ai，启用该组合包的每个会话都可访问。"
+kind: "package-bundle"
+---
+
 # @deepseek-ai/dsh-supermemory
 
 [English](README.md) | 中文
 
-可选的托管记忆 profile 组合包：持久记忆存储在 [supermemory.ai](https://supermemory.ai)，启用该组合包的每个会话都可访问。[`cordis.patch.yml`](cordis.patch.yml) 是本包的实质内容，由 `dsh.bundle.patch` manifest 字段声明；该补丁在基础组合之上插入三行，不修改任何既有行，因此未启用本组合包的 profile 不受影响。
+## 概述
+
+可选的托管记忆 profile 组合包：持久记忆存储在 [supermemory.ai](https://supermemory.ai)，启用该组合包的每个会话都可访问。[`cordis.patch.yml`](cordis.patch.yml) 是本包的实质内容，由 `dsh.bundle.patch` manifest 字段声明；该补丁在基础组合之上插入三行，不修改任何既有行，因此未启用本组合包的 profile 不受影响。缺少密钥或 `api.supermemory.ai` 不可达时，召回降级为警告日志，而 `memory_*` 工具调用以结构化的 `MemoryError` 结果失败。
+
+## 目录
+
+- [组合包构成](#bundle-composition)
+- [模型体验](#model-experience)
+- [已知限制与暂缓事项](#known-limitations-and-deferred-work)
+- [开发备注](#dev-note)
+
+-----
+
+<a id="bundle-composition"></a>
+## 组合包构成
 
 | 行 | 包 | 贡献 |
 |---|---|---|
@@ -24,6 +43,7 @@
 
 提供方行在每次操作时解析 API 密钥（credentials 服务、启动环境变量或只读的 Codex 凭据文件）。缺少密钥或 `api.supermemory.ai` 不可达时，召回降级为警告日志并省略该节，而 `memory_*` 工具调用以结构化的 `MemoryError` 结果失败。
 
+<a id="model-experience"></a>
 ## 模型体验
 
 ### 组合出的记忆上下文
@@ -41,5 +61,16 @@
 在 profile 中增删本组合包会从下一个会话起改变组合后的请求前缀；组合包自身不修改前缀。
 
 ## 已知限制与暂缓事项
+<a id="known-limitations-and-deferred-work"></a>
 
 - **需要 supermemory 账号且 `api.supermemory.ai` 可达**：缺少密钥时所有记忆操作失败；故障期间召回降级为警告日志并省略该节。
+
+<a id="dev-note"></a>
+### 开发备注
+
+<details>
+<summary>维护者工作背景 — 点击展开</summary>
+
+本组合包只拥有补丁 manifest 与本文档；其组合出的所有行为归三个被插入行的包所有。功能变更请在那些包中评审；仅当行集合、行顺序或提供方配置变化时才修改本包。
+
+</details>

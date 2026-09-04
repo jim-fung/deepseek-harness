@@ -1,9 +1,27 @@
+---
+description: "Model-facing consumer for the memory capability seam: registers the memory_save, memory_search, and memory_forget tools, a guidance system-prompt section, and the recall section; execution goes through ctx.memory, never provider selection or network access."
+kind: "package-reference"
+---
+
 # @deepseek-ai/dsh-tool-memory
 
 English | [中文](README.zh.md)
 
+## Summary
+
 Model-facing consumer for the [memory capability seam](../memory/README.md): it registers the `memory_save`, `memory_search`, and `memory_forget` tools, a guidance system-prompt section, and the recall section that injects the user's memory profile into every assembled prompt. Execution goes through `ctx.memory`; this package owns schemas, validation, guidance, and recall, never provider selection or network access.
 
+## Table of Contents
+
+- [Tools](#tools)
+- [Recall](#recall)
+- [Model Experience](#model-experience)
+- [Known Limitations and Deferred Work](#known-limitations-and-deferred-work)
+- [Dev Note](#dev-note)
+
+-----
+
+<a id="tools"></a>
 ## Tools
 
 | Tool | Arguments | Notes |
@@ -14,10 +32,12 @@ Model-facing consumer for the [memory capability seam](../memory/README.md): it 
 
 Config flags `save`, `searchAndForget`, and `recall` (all default `true`) select the tool families and the recall section; the guidance section `tool:memory` (order 120) registers whenever either tool family is enabled. The project scope id is derived at execution time from the process working directory (nearest ancestor containing `.git`, else the working directory itself); a scope word other than `project` or `global` throws `MemoryError` code `MEMORY_REQUEST_INVALID`. An enabled tool stays visible when its provider is unavailable and fails with a structured error at execution time.
 
+<a id="recall"></a>
 ## Recall
 
 The `system-prompt/assemble` waterfall listener awaits `next()`, fetches `ctx.memory.profile()`, and appends the section `memory-profile` (`MEMORY_PROFILE_SECTION_NAME`) after all ordered sections, so it renders last in the joined prompt. An empty profile contributes no section; any recall failure degrades to a logged warning with the section omitted — an unreachable memory service must not fail the session. Assembled sections are part of the assembly result, so injected text stays reconstructable from the session log.
 
+<a id="model-experience"></a>
 ## Model Experience
 
 ### Guidance system prompt
@@ -69,6 +89,17 @@ Conditional: zero while the profile is empty or `recall` is off; otherwise profi
 The section is part of the request prefix, so a profile that changes between assemblies invalidates reuse from the next request; an unchanged profile is a stable repeated prefix.
 
 ## Known Limitations and Deferred Work
+<a id="known-limitations-and-deferred-work"></a>
 
 - **Recall adds one static section per assembly** — the section reflects the profile fetched at assembly time; there is no incremental update mid-session.
 - **Project scope derives from the process cwd at execution time** — a session that changes working directory between calls addresses different project partitions.
+
+<a id="dev-note"></a>
+### Dev Note
+
+<details>
+<summary>Working context for maintainers — click to expand</summary>
+
+The package owns schemas, validation, guidance, and recall; provider selection and network access stay behind `ctx.memory` and its provider packages. Guidance text, tool schemas, and the recall section are the model-visible surface, so edits here change the assembled request prefix from the next assembly on.
+
+</details>

@@ -1,9 +1,27 @@
+---
+description: "A supermemory.ai-backed MemoryProvider for the harness memory capability seam: a function plugin that registers provider memory-provider:supermemory into ctx.memory and registers no model-facing tool."
+kind: "package-reference"
+---
+
 # @deepseek-ai/dsh-memory-supermemory
 
 English | [中文](README.zh.md)
 
+## Summary
+
 A [supermemory.ai](https://supermemory.ai)-backed `MemoryProvider` for the harness [memory capability seam](../memory/README.md) (`ctx.memory`). This is an implementation package: a function plugin (`inject: ['memory']`) that registers provider `memory-provider:supermemory` into the seam owned by [`@deepseek-ai/dsh-memory`](../memory/README.md); it registers no model-facing tool (that is [`@deepseek-ai/dsh-tool-memory`](../tool-memory/README.md)).
 
+## Table of Contents
+
+- [Config](#config)
+- [Remote mapping](#remote-mapping)
+- [Model Experience](#model-experience)
+- [Known Limitations and Deferred Work](#known-limitations-and-deferred-work)
+- [Dev Note](#dev-note)
+
+-----
+
+<a id="config"></a>
 ## Config
 
 | Key | Default | Meaning |
@@ -14,10 +32,12 @@ A [supermemory.ai](https://supermemory.ai)-backed `MemoryProvider` for the harne
 
 The API key resolves at each operation and is never cached: the credentials service resolves the reference when mounted, otherwise the launch environment variable supplies it, and the read-only `~/.codex/supermemory/credentials.json` (the Codex plugin's login file, never written by dsh) is the final fallback. When no source yields a usable key, the operation throws `MemoryError` code `MEMORY_PROVIDER_UNAVAILABLE` naming every consulted source; a session boots without touching the network or the secret store.
 
+<a id="remote-mapping"></a>
 ## Remote mapping
 
 Scope identity travels entirely in container tags, the only partition the remote API offers: `global` maps to `<prefix>-global` and `project` to `<prefix>-project-<slug>`, where the slug keeps the project id's ASCII alphanumerics lowercased and joined by single hyphens (`unnamed` when nothing survives). `add` posts one document to `/v3/documents`; `search` posts to `/v4/search` and keeps documents carrying both id and content; `remove` deletes `/v3/documents/<id>` and treats HTTP 404 as success; `profile` reads `/v4/profile`. Any other non-2xx response throws `MEMORY_PROVIDER_UNAVAILABLE`; an add response without a document id throws `MEMORY_REQUEST_INVALID`.
 
+<a id="model-experience"></a>
 ## Model Experience
 
 ### Provider data surfaced by the consumer
@@ -35,7 +55,18 @@ Zero direct; tokens enter requests only through the consumer, sized by remote se
 None; the provider changes no request prefix. A changed remote profile alters the consumer's recall section from the next assembly on.
 
 ## Known Limitations and Deferred Work
+<a id="known-limitations-and-deferred-work"></a>
 
 - **Wire shapes are unpinned externally** — the vendor request and response fields are owned by [`src/client.ts`](src/client.ts) with the self-skipping real-API e2e (`tests/supermemory.e2e.ts`) as the drift alarm; nothing outside the package may depend on them.
 - **Project slugs can collide** — slugification drops case and separators, so paths differing only by case or separator characters address one shared remote container.
 - **The Codex credentials file is never written** — dsh reads it as a fallback and leaves login, logout, and refresh to the Codex plugin.
+
+<a id="dev-note"></a>
+### Dev Note
+
+<details>
+<summary>Working context for maintainers — click to expand</summary>
+
+This package owns credential resolution, the container-tag scope mapping, and the wire client; the tools and recall section that surface its data are owned by dsh-tool-memory. The self-skipping real-API e2e (`tests/supermemory.e2e.ts`) is the drift alarm for the externally unpinned wire shapes.
+
+</details>

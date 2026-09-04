@@ -53,6 +53,8 @@ export interface JsonSchemaNode {
   default?: JsonValue
   /** Annotation, ignored for validation but required to be lossless JSON. */
   examples?: JsonValue
+  /** Dialect URI metadata (emitted by the official MCP SDK); ignored for validation. */
+  $schema?: string
 }
 
 /** A consumer-constrained object-rooted schema. */
@@ -83,7 +85,7 @@ const CONSTRAINT_KEYWORDS = new Set([
   'enum',
   'const',
 ])
-const ANNOTATION_KEYWORDS = new Set(['description', 'title', 'default', 'examples'])
+const ANNOTATION_KEYWORDS = new Set(['description', 'title', 'default', 'examples', '$schema'])
 const SCHEMA_TYPES: readonly JsonSchemaType[] = ['object', 'array', 'string', 'number', 'integer', 'boolean', 'null']
 
 /* jscpd:ignore-start -- this realm boundary mirrors the session-owned lossless-JSON intrinsic test */

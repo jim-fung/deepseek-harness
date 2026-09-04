@@ -11,6 +11,7 @@ import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { createUserMessage, freezeMessage } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, UserMessage } from '@deepseek-ai/dsh-llm'
+import { SessionLogOffset } from '@deepseek-ai/dsh-session'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 // Type-only: the `title` projection key plus the live registry and durable
 // cache Context merges — the two projection faces discovery labels from.
@@ -74,16 +75,10 @@ interface PreparedSource {
 interface RenderedSource {
   data: ReferencedSessionData
   stats: ReferenceRetentionStats
+  capturedFormatVersion: number
 }
 
 /** Exact-read consumer that prepares immutable cross-session message context. */
-/** One listed session with its projected label, in listing order. */
-interface LabelledCandidate {
-  record: SessionRecord
-  index: number
-  label: string
-}
-
 export class SessionReferenceResolver extends TypertRemoteService {
   static inject = ['sessionQuery']
   static Config: z<Config> = z.object({
@@ -183,9 +178,15 @@ export class SessionReferenceResolver extends TypertRemoteService {
     const needle = query.toLocaleLowerCase()
     const targetCwd = agent.session.header.cwd
     assertNotCancelled(signal)
-    const labelled = await this.labelledCandidates(signal)
+    const records = (await settleWithCancellation(this.ctx.sessionQuery.listSessions(signal), signal))
+      .filter(record => record.header.id !== agent.id)
+      .map((record, index) => ({ record, index }))
+    const labelled = records.map(({ record, index }) => ({
+      record,
+      index,
+      label: this.projectedTitle(record) ?? record.header.id,
+    }))
     return labelled.filter(({ record, label }) => {
-      if (record.header.id === agent.id) return false
       if (needle === '') return true
       return record.header.id.toLocaleLowerCase().includes(needle)
         || record.header.cwd?.toLocaleLowerCase().includes(needle) === true
@@ -201,43 +202,6 @@ export class SessionReferenceResolver extends TypertRemoteService {
         createdAt: record.header.createdAt,
       }))
   }
-
-  /**
-   * Every listed session with its projected label, cached until the corpus or
-   * a live title moves. The key is the query engine's corpus revision — exact
-   * for the live half, the persistence backend's set fingerprint for the
-   * persisted half — plus one entry per live session's current title, so a
-   * rename is visible on the next keystroke without re-listing the store.
-   * Persisted headers are immutable and cold titles only change when a
-   * session opens (and goes live), so the cached labels cannot go stale.
-   *
-   * The per-caller self-exclusion and the cwd ranking stay in
-   * {@link listCandidates} because both depend on the calling agent.
-   * @param signal - optional cancellation boundary for host autocomplete teardown.
-   * @returns labeled records in listing order.
-   */
-  private async labelledCandidates(signal?: AbortSignal): Promise<LabelledCandidate[]> {
-    const liveSessions = this.ctx.get('sessions')?.list() ?? []
-    const titleFingerprint = liveSessions.map((session) => {
-      const projections = this.ctx.get('sessionProjections')
-      const title = projections !== undefined ? titleOf(projections.snapshot(session, ['title'])) : undefined
-      return `${session.id}:${title ?? ''}`
-    }).sort().join('|')
-    const revision = await settleWithCancellation(this.ctx.sessionQuery.corpusRevision(signal), signal)
-    const key = `${revision}|${titleFingerprint}`
-    if (this.labelledCache?.key === key) return this.labelledCache.labelled
-
-    const records = (await settleWithCancellation(this.ctx.sessionQuery.listSessions(signal), signal))
-      .map((record, index) => ({
-        record,
-        index,
-        label: this.projectedTitle(record) ?? record.header.id,
-      }))
-    this.labelledCache = { key, labelled: records }
-    return records
-  }
-
-  private labelledCache: { key: string; labelled: LabelledCandidate[] } | undefined
 
   /**
    * The title a session's projections can answer without reading its log.
@@ -267,7 +231,12 @@ export class SessionReferenceResolver extends TypertRemoteService {
     if (attached !== undefined && projections !== undefined) {
       return titleOf(projections.snapshot(attached, ['title']))
     }
-    return titleOf(this.ctx.get('sessionProjectionCache')?.cachedSnapshot(record.header, ['title']))
+    if (record.header.isSeeded) return undefined
+    return titleOf(this.ctx.get('sessionProjectionCache')?.cachedSnapshot(
+      record.header,
+      SessionLogOffset(0),
+      ['title'],
+    ))
   }
 
   /**
@@ -338,6 +307,7 @@ export class SessionReferenceResolver extends TypertRemoteService {
       references: rendered.map((source, index) => ({
         sessionId: source.data.sessionId,
         label: source.data.label,
+        capturedFormatVersion: source.capturedFormatVersion,
         capturedThroughSeq: source.data.capturedThroughSeq,
         ...source.stats,
         inputIndex: index,
@@ -360,7 +330,10 @@ export class SessionReferenceResolver extends TypertRemoteService {
           'SESSION_REFERENCE_BUDGET_EXCEEDED',
         )
       }
-      rendered.push(retained)
+      rendered.push({
+        ...retained,
+        capturedFormatVersion: source.snapshot.session.version,
+      })
     }
     return rendered
   }

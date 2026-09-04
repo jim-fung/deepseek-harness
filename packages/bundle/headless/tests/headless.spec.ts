@@ -3,11 +3,9 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry, { Inbox } from '@deepseek-ai/dsh-agent'
-import type { Agent, AgentHandle, CreateAgentOptions } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentHandle, AssistantStreamFrame, CreateAgentOptions } from '@deepseek-ai/dsh-agent'
 import AgentDefaultModelConfig from '@deepseek-ai/dsh-agent-default-model'
-import { createAssistantMessage } from '@deepseek-ai/dsh-llm'
-import type { ToolCallId } from '@deepseek-ai/dsh-llm'
-import { brandString } from '@deepseek-ai/dsh-brand'
+import { LlmAttemptId, createAssistantMessage, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import SessionStore from '@deepseek-ai/dsh-session'
 import type { Session, UserMessage } from '@deepseek-ai/dsh-session'
 import { apply, Config, internals } from '../src/index.ts'
@@ -17,7 +15,30 @@ afterEach(() => { Object.assign(internals, originalInternals) })
 
 interface Script {
   before?(session: Session): void
-  afterPrompt(session: Session, message: UserMessage): Promise<void> | void
+  afterPrompt(session: Session, message: UserMessage, agent: Agent): Promise<void> | void
+}
+
+const frameStates = new WeakMap<Agent, { attemptId: ReturnType<typeof LlmAttemptId>; revision: number; index: number }>()
+
+function startFrames(agent: Agent, turn = 1, step = 1): void {
+  const state = { attemptId: LlmAttemptId(`${agent.id}:test`), revision: 1, index: 0 }
+  frameStates.set(agent, state)
+  agent.ctx.emit('agent/assistant-stream', {
+    agent,
+    frame: {
+      type: 'start', attemptId: state.attemptId, revision: state.revision, turn, step,
+    },
+  })
+}
+
+function emitChunk(agent: Agent, chunk: StreamChunk): void {
+  const state = frameStates.get(agent)
+  if (state === undefined) throw new Error('test Assistant frames have not started')
+  const frame: AssistantStreamFrame = {
+    type: 'chunk', attemptId: state.attemptId, revision: ++state.revision,
+    index: state.index++, time: Date.now(), chunk,
+  }
+  agent.ctx.emit('agent/assistant-stream', { agent, frame })
 }
 
 function appendTurn(
@@ -32,6 +53,7 @@ function appendTurn(
   session.append('user/message', message, { surfaceOp: 'append' })
   if (text !== undefined) {
     session.append('assistant/message', {
+      stream: [],
       turn,
       step: 1,
       message: createAssistantMessage({
@@ -82,7 +104,7 @@ async function bench(script: Script): Promise<{
         send: () => {},
         followup: (message: UserMessage) => {
           agent.inbox.append('next-turn', message)
-          idle = Promise.resolve().then(() => script.afterPrompt(session, message))
+          idle = Promise.resolve().then(() => script.afterPrompt(session, message, agent))
         },
         steer: () => {},
         inject: () => {},
@@ -130,7 +152,7 @@ describe('headless runner', () => {
     expect(result).toEqual({
       code: 0,
       out: 'final answer\n',
-      err: '# turn started\n# turn started\n',
+      err: '',
       order: ['flush', 'exit'],
     })
     await test.ctx.fiber.dispose()
@@ -143,50 +165,7 @@ describe('headless runner', () => {
         appendTurn(session, 1, message, 'race-free answer', true)
       },
     })
-    expect(await test.run()).toMatchObject({ code: 0, out: 'race-free answer\n', err: '# turn started\n' })
-    await test.ctx.fiber.dispose()
-  })
-
-  it('heartbeats one stderr line per turn and per tool call, and none to stdout', async () => {
-    const test = await bench({
-      afterPrompt(session, message) {
-        session.append('turn/start', { turn: 1 })
-        session.append('step/start', { turn: 1, step: 1 })
-        session.append('user/message', message, { surfaceOp: 'append' })
-        // An unterminated reasoning line is closed before the heartbeat so
-        // every stderr line stays a single physical line.
-        session.append('assistant/chunk', {
-          turn: 1,
-          step: 1,
-          chunk: { type: 'reasoning-delta', index: 0, text: 'thinking' },
-        })
-        session.append('tool/call', {
-          turn: 1,
-          step: 1,
-          callId: brandString<ToolCallId>('call-read'),
-          name: 'read_file',
-          arguments: '{}',
-        })
-        session.append('assistant/message', {
-          turn: 1,
-          step: 1,
-          message: createAssistantMessage({
-            content: [{ type: 'text', text: 'after the tool' }],
-            source: { provider: 'test-provider', model: 'test-model' },
-          }),
-        }, { surfaceOp: 'append' })
-        session.append('step/end', { turn: 1, step: 1 })
-        session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
-      },
-    })
-    const result = await test.run()
-    expect(result).toEqual({
-      code: 0,
-      out: 'after the tool\n',
-      err: '# turn started\ndsh: reasoning:\nthinking\n# tool: read_file\n',
-      order: ['flush', 'exit'],
-    })
-    expect(result.out).not.toContain('#')
+    expect(await test.run()).toMatchObject({ code: 0, out: 'race-free answer\n', err: '' })
     await test.ctx.fiber.dispose()
   })
 
@@ -194,68 +173,26 @@ describe('headless runner', () => {
     const reasoningAppended = Promise.withResolvers<undefined>()
     const release = Promise.withResolvers<undefined>()
     const test = await bench({
-      async afterPrompt(session, message) {
+      async afterPrompt(session, message, agent) {
         session.append('turn/start', { turn: 1 })
         session.append('step/start', { turn: 1, step: 1 })
         session.append('user/message', message, { surfaceOp: 'append' })
-        session.append('assistant/chunk', {
-          turn: 1,
-          step: 1,
-          chunk: { type: 'block-start', index: 0, blockType: 'reasoning' },
-        })
-        session.append('assistant/chunk', {
-          turn: 1,
-          step: 1,
-          chunk: { type: 'reasoning-delta', index: 0, text: '' },
-        })
-        session.append('assistant/chunk', {
-          turn: 1,
-          step: 1,
-          chunk: { type: 'reasoning-delta', index: 0, text: 'checking the workspace' },
-        })
-        session.append('assistant/chunk', {
-          turn: 1,
-          step: 1,
-          chunk: { type: 'reasoning-delta', index: 0, text: ' safely\n' },
-        })
-        session.append('assistant/chunk', {
-          turn: 1,
-          step: 1,
-          chunk: { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'checking the workspace safely\n' } },
-        })
-        session.append('assistant/chunk', {
-          turn: 1,
-          step: 1,
-          chunk: { type: 'usage', usage: { inputTokens: 1, outputTokens: 2, reasoningTokens: 2 } },
-        })
-        session.append('assistant/chunk', {
-          turn: 1,
-          step: 1,
-          chunk: { type: 'block-start', index: 1, blockType: 'reasoning' },
-        })
-        session.append('assistant/chunk', {
-          turn: 1,
-          step: 1,
-          chunk: { type: 'reasoning-delta', index: 1, text: 'second pass\n' },
-        })
+        startFrames(agent)
+        emitChunk(agent, { type: 'block-start', index: 0, blockType: 'reasoning' })
+        emitChunk(agent, { type: 'reasoning-delta', index: 0, text: '' })
+        emitChunk(agent, { type: 'reasoning-delta', index: 0, text: 'checking the workspace' })
+        emitChunk(agent, { type: 'reasoning-delta', index: 0, text: ' safely\n' })
+        emitChunk(agent, { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'checking the workspace safely\n' } })
+        emitChunk(agent, { type: 'usage', usage: { inputTokens: 1, outputTokens: 2, reasoningTokens: 2 } })
+        emitChunk(agent, { type: 'block-start', index: 1, blockType: 'reasoning' })
+        emitChunk(agent, { type: 'reasoning-delta', index: 1, text: 'second pass\n' })
         reasoningAppended.resolve(undefined)
         await release.promise
-        session.append('assistant/chunk', {
-          turn: 1,
-          step: 1,
-          chunk: { type: 'block-start', index: 2, blockType: 'text' },
-        })
-        session.append('assistant/chunk', {
-          turn: 1,
-          step: 1,
-          chunk: { type: 'text-delta', index: 2, text: 'done' },
-        })
-        session.append('assistant/chunk', {
-          turn: 1,
-          step: 1,
-          chunk: { type: 'block-end', index: 2, block: { type: 'text', text: 'done' } },
-        })
+        emitChunk(agent, { type: 'block-start', index: 2, blockType: 'text' })
+        emitChunk(agent, { type: 'text-delta', index: 2, text: 'done' })
+        emitChunk(agent, { type: 'block-end', index: 2, block: { type: 'text', text: 'done' } })
         session.append('assistant/message', {
+          stream: [],
           turn: 1,
           step: 1,
           message: createAssistantMessage({
@@ -272,25 +209,71 @@ describe('headless runner', () => {
     const other = test.ctx.sessions.create()
     other.append('turn/start', { turn: 1 })
     other.append('step/start', { turn: 1, step: 1 })
-    other.append('assistant/chunk', {
-      turn: 1,
-      step: 1,
-      chunk: { type: 'reasoning-delta', index: 0, text: 'other session' },
+    test.ctx.emit('agent/assistant-stream', {
+      agent: { session: other } as Agent,
+      frame: {
+        type: 'chunk', attemptId: LlmAttemptId('other'), revision: 1,
+        index: 0, time: Date.now(), chunk: { type: 'reasoning-delta', index: 0, text: 'other session' },
+      },
     })
     const streamed = test.output()
     release.resolve(undefined)
     const result = await running
     expect(streamed).toEqual({
       out: '',
-      err: '# turn started\ndsh: reasoning:\nchecking the workspace safely\nsecond pass\n',
+      err: 'dsh: reasoning:\nchecking the workspace safely\nsecond pass\n',
       order: [],
     })
     expect(result).toEqual({
       code: 0,
       out: 'done\n',
-      err: '# turn started\ndsh: reasoning:\nchecking the workspace safely\nsecond pass\n',
+      err: 'dsh: reasoning:\nchecking the workspace safely\nsecond pass\n',
       order: ['flush', 'exit'],
     })
+    await test.ctx.fiber.dispose()
+  })
+
+  it('closes an unterminated reasoning line as soon as the attempt ends', async () => {
+    const reasoningAppended = Promise.withResolvers<undefined>()
+    const releaseEnd = Promise.withResolvers<undefined>()
+    const ended = Promise.withResolvers<undefined>()
+    const finish = Promise.withResolvers<undefined>()
+    const test = await bench({
+      async afterPrompt(session, message, agent) {
+        session.append('turn/start', { turn: 1 })
+        session.append('step/start', { turn: 1, step: 1 })
+        session.append('user/message', message, { surfaceOp: 'append' })
+        startFrames(agent)
+        emitChunk(agent, { type: 'reasoning-delta', index: 0, text: 'unfinished reasoning' })
+        reasoningAppended.resolve(undefined)
+        await releaseEnd.promise
+        const state = frameStates.get(agent)
+        if (state === undefined) throw new Error('test Assistant frames have not started')
+        agent.ctx.emit('agent/assistant-stream', {
+          agent,
+          frame: {
+            type: 'end', attemptId: state.attemptId, revision: ++state.revision,
+            index: state.index, outcome: { kind: 'abandoned' },
+          },
+        })
+        ended.resolve(undefined)
+        await finish.promise
+        session.append('step/end', { turn: 1, step: 1 })
+        session.append('turn/end', {
+          turn: 1, reason: { kind: 'aborted', reason: { kind: 'user' } },
+        })
+      },
+    })
+    const running = test.run()
+    await reasoningAppended.promise
+    expect(test.output().err).toBe('dsh: reasoning:\nunfinished reasoning')
+
+    releaseEnd.resolve(undefined)
+    await ended.promise
+    expect(test.output().err).toBe('dsh: reasoning:\nunfinished reasoning\n')
+
+    finish.resolve(undefined)
+    await expect(running).resolves.toMatchObject({ code: 1 })
     await test.ctx.fiber.dispose()
   })
 
@@ -298,7 +281,7 @@ describe('headless runner', () => {
     const test = await bench({
       afterPrompt(session, message) { appendTurn(session, 1, message, undefined, false) },
     })
-    expect(await test.run()).toMatchObject({ code: 1, out: '', err: '# turn started\n' })
+    expect(await test.run()).toMatchObject({ code: 1, out: '\n', err: '' })
     await test.ctx.fiber.dispose()
   })
 
@@ -317,23 +300,20 @@ describe('headless runner', () => {
     })
     expect(await test.run()).toMatchObject({
       code: 1,
-      out: '',
-      err: '# turn started\ndsh: SERVER: provider unavailable\n',
+      out: '\n',
+      err: 'dsh: SERVER: provider unavailable\n',
     })
     await test.ctx.fiber.dispose()
   })
 
   it('separates an unterminated reasoning prefix from the terminal model failure', async () => {
     const test = await bench({
-      afterPrompt(session, message) {
+      afterPrompt(session, message, agent) {
         session.append('turn/start', { turn: 1 })
         session.append('step/start', { turn: 1, step: 1 })
         session.append('user/message', message, { surfaceOp: 'append' })
-        session.append('assistant/chunk', {
-          turn: 1,
-          step: 1,
-          chunk: { type: 'reasoning-delta', index: 0, text: 'trying recovery' },
-        })
+        startFrames(agent)
+        emitChunk(agent, { type: 'reasoning-delta', index: 0, text: 'trying recovery' })
         session.append('step/end', { turn: 1, step: 1 })
         session.append('turn/end', {
           turn: 1,
@@ -343,15 +323,30 @@ describe('headless runner', () => {
     })
     expect(await test.run()).toMatchObject({
       code: 1,
-      out: '',
-      err: '# turn started\ndsh: reasoning:\ntrying recovery\ndsh: SERVER: provider unavailable\n',
+      out: '\n',
+      err: 'dsh: reasoning:\ntrying recovery\ndsh: SERVER: provider unavailable\n',
     })
     await test.ctx.fiber.dispose()
   })
 
   it('exits 1 when the owned interval contains no turn', async () => {
     const test = await bench({ afterPrompt: () => {} })
-    expect(await test.run()).toMatchObject({ code: 1, out: '', err: '' })
+    expect(await test.run()).toMatchObject({ code: 1, out: '\n', err: '' })
+    await test.ctx.fiber.dispose()
+  })
+
+  it('fails when an event below the captured Session length cannot be read', async () => {
+    const test = await bench({
+      afterPrompt(session, message) {
+        appendTurn(session, 1, message, 'unreachable', true)
+        Object.defineProperty(session, 'eventAt', { value: () => undefined })
+      },
+    })
+    expect(await test.run()).toMatchObject({
+      code: 1,
+      out: '',
+      err: 'dsh: headless summary cannot read seq 0 below captured length 7\n',
+    })
     await test.ctx.fiber.dispose()
   })
 

@@ -1,9 +1,26 @@
+---
+description: "持久记忆能力 seam 的 Service Definition：以 MemoryRuntime 服务持有 ctx.memory 键，并把按 scope 划分的操作委托给唯一活跃的 MemoryProvider。"
+kind: "package-reference"
+---
+
 # @deepseek-ai/dsh-memory
 
 [English](README.md) | 中文
 
+## 概述
+
 持久记忆能力 seam 的 Service Definition：以 `MemoryRuntime` 服务持有 `ctx.memory` 键，并把按 scope 划分的操作委托给唯一活跃的 `MemoryProvider`。本包不持有存储；提供方向其注册（例如 [`@deepseek-ai/dsh-memory-supermemory`](../memory-supermemory/README.zh.md)），消费方负责渲染结果（例如 [`@deepseek-ai/dsh-tool-memory`](../tool-memory/README.zh.md)）。
 
+## 目录
+
+- [注册与委托](#registration-and-delegation)
+- [模型体验](#model-experience)
+- [已知限制与暂缓事项](#known-limitations-and-deferred-work)
+- [开发备注](#dev-note)
+
+-----
+
+<a id="registration-and-delegation"></a>
 ## 注册与委托
 
 `registerMemoryProvider(provider)` 使新提供方立即生效：后续注册会替换当前提供方，返回的清理函数只移除该次注册，并恢复被它顶替的提供方。活跃提供方始终是最近注册且尚未清理的那一个。没有任何注册提供方时，操作抛出 `MemoryError`，code 为 `MEMORY_NO_PROVIDER`。
@@ -17,6 +34,7 @@
 
 Scope 按 kind 判别：`{ kind: 'global' }` 寻址用户级记忆，`{ kind: 'project'; id: string }` 寻址单个项目分区。项目 id 由消费方派生——[`dsh-tool-memory`](../tool-memory/README.zh.md) 从进程工作目录派生——绝不由提供方派生；提供方只接收 id 并在其后划分存储。后端无法服务时抛出 `MemoryError`，code 为 `MEMORY_PROVIDER_UNAVAILABLE`。
 
+<a id="model-experience"></a>
 ## 模型体验
 
 ### 由消费方呈现的提供方数据
@@ -34,6 +52,17 @@ Scope 按 kind 判别：`{ kind: 'global' }` 寻址用户级记忆，`{ kind: 'p
 无；委托不改变任何请求前缀。召回节的位置与提供方数据的变化归消费方和活跃提供方所有。
 
 ## 已知限制与暂缓事项
+<a id="known-limitations-and-deferred-work"></a>
 
 - **刻意只保留单个活跃提供方**：后续注册不经仲裁直接替换先前的注册；多提供方扇出或优先级规则等待真实需求出现。
 - **没有事件流**：seam 不发出事件，因此召回内容只能通过组装后的提示词观察，无法通过可记录的事件流观察。
+
+<a id="dev-note"></a>
+### 开发备注
+
+<details>
+<summary>维护者工作背景 — 点击展开</summary>
+
+本包只拥有注册顺序与委托：提供方行为与存储归被注册的提供方包所有，模型可见的渲染归消费方包所有。活跃提供方规则（最近注册者生效；清理函数恢复被顶替的提供方）就是全部生命周期约定。
+
+</details>

@@ -448,6 +448,8 @@ interface JsonSchemaNode {
   default?: JsonValue
   /** Annotation, ignored for validation but required to be lossless JSON. */
   examples?: JsonValue
+  /** Dialect URI metadata (emitted by the official MCP SDK); ignored for validation. */
+  $schema?: string
 }
 ```
 
