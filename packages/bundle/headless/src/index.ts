@@ -2,8 +2,8 @@
  * @deepseek-ai/dsh-headless — one-shot direct Agent driver. The bundle patch
  * rides over dsh-base without Host, HTTP, or browser plugins; this runner
  * creates one Agent through the core registry, drives the task to quiescence,
- * streams provider reasoning to stderr, flushes its Session, prints the final
- * assistant text to stdout, and exits.
+ * streams turn and tool heartbeats plus provider reasoning to stderr, flushes
+ * its Session, prints the final assistant text to stdout, and exits.
  *
  * @module @deepseek-ai/dsh-headless
  */
@@ -89,14 +89,18 @@ function summarize(session: Session, firstSeq: SessionLogOffset): RunOutcome {
 }
 
 /**
- * Project provider-reported reasoning from one owned run to stderr as it is
- * streamed, while keeping final outcome derivation on the durable log.
- * @param ctx - plugin context carrying the live Assistant frame feed.
- * @param agent - the exact Agent whose reasoning belongs to this invocation.
+ * Project one owned run's progress to stderr as it occurs — a heartbeat line
+ * per turn start and per tool call, then provider-reported reasoning as it is
+ * streamed — while keeping final outcome derivation on the durable log.
+ * Heartbeat lines are progress-channel only: they reach no stdout stream and
+ * no session event, and the durable turn/start and tool/call records project
+ * them back byte-for-byte.
+ * @param ctx - plugin context carrying the live Assistant frame feed and the Session event feed.
+ * @param agent - the exact Agent whose run belongs to this invocation.
  * @param stderr - progress output sink.
  * @returns a disposer that also terminates an unterminated reasoning line.
  */
-function streamReasoning(
+function streamProgress(
   ctx: Context,
   agent: Agent,
   stderr: HeadlessIo['stderr'],
@@ -109,7 +113,7 @@ function streamReasoning(
     open = false
     endsWithNewline = true
   }
-  const dispose = ctx.on('agent/assistant-stream', ({ agent: subject, frame }) => {
+  const stopFrames = ctx.on('agent/assistant-stream', ({ agent: subject, frame }) => {
     if (subject !== agent) return
     if (frame.type === 'start') {
       close()
@@ -148,8 +152,23 @@ function streamReasoning(
         return assertNever(chunk, 'headless reasoning stream')
     }
   })
+  // Heartbeats read the durable-log feed so the projection stays reconstructable
+  // from session records; the Assistant frame feed carries no turn boundaries.
+  const stopHeartbeats = ctx.on('session/event', (session, event) => {
+    if (session !== agent.session) return
+    if (event.type === 'turn/start') {
+      close()
+      stderr.write('# turn started\n')
+      return
+    }
+    if (event.type === 'tool/call') {
+      close()
+      stderr.write(`# tool: ${event.data.name}\n`)
+    }
+  })
   return () => {
-    dispose()
+    stopFrames()
+    stopHeartbeats()
     close()
   }
 }
@@ -192,7 +211,7 @@ async function run(ctx: Context, task: string, io: HeadlessIo): Promise<void> {
   })
   await agent.whenIdle()
   const firstSeq = agent.session.seq
-  const stopReasoning = streamReasoning(ctx, agent, io.stderr)
+  const stopProgress = streamProgress(ctx, agent, io.stderr)
   try {
     agent.followup(createUserMessage({
       content: [{ type: 'text', text: task }],
@@ -200,7 +219,7 @@ async function run(ctx: Context, task: string, io: HeadlessIo): Promise<void> {
     }))
     await agent.whenIdle()
   } finally {
-    stopReasoning()
+    stopProgress()
   }
   await sessions.flush(agent.session)
   const outcome = summarize(agent.session, firstSeq)

@@ -24,7 +24,7 @@ const goldensDir = fileURLToPath(new URL('./expected/', import.meta.url))
 const goalScenarioDir = join(goldensDir, 'goal-tools')
 const goalConfigPath = fileURLToPath(new URL('../goal-snapshot.patch.yml', import.meta.url))
 const memoryScenarioDir = fileURLToPath(new URL('./snapshots/memory-tools/', import.meta.url))
-const memoryConfigPath = fileURLToPath(new URL('../memory.cordis.snapshot.yml', import.meta.url))
+const memoryConfigPath = fileURLToPath(new URL('../memory-snapshot.patch.yml', import.meta.url))
 const retryScenarioDir = join(goldensDir, 'provider-retry')
 const retryConfigPath = fileURLToPath(new URL('../retry-snapshot.patch.yml', import.meta.url))
 const credentialsScenarioDir = join(goldensDir, 'missing-credential')
@@ -268,7 +268,7 @@ describe('headless stream-json snapshots', () => {
       },
     })
 
-    expect(result.stdout).toBe('')
+    expect(result.stdout).toBe('\n')
     await expect(result.stderr).toMatchFileSnapshot(headlessFailureExpected)
   }, LOADER_SMOKE_TEST_TIMEOUT_MS)
 

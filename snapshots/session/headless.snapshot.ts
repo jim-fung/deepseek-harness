@@ -383,10 +383,18 @@ function stderrFromSession(log: string): string {
     if (record.type === 'turn/start') {
       close()
       started = true
+      output += '# turn started\n'
       continue
     }
     if (!started) continue
     const data = record.data as JsonObject | undefined
+    if (record.type === 'tool/call') {
+      const name = data?.name
+      if (typeof name !== 'string') throw new Error('headless snapshot tool call has no name')
+      close()
+      output += `# tool: ${name}\n`
+      continue
+    }
     if ((record.type === 'assistant/message' || record.type === 'assistant/attempt')
       && Array.isArray(data?.stream)) {
       for (const entry of data.stream) {
@@ -685,6 +693,7 @@ describe('headless recorded-session snapshots', () => {
     ].map(record => JSON.stringify(record)).join('\n')
 
     expect(stderrFromSession(log)).toBe([
+      '# turn started',
       'dsh: reasoning:',
       'first',
       'dsh: reasoning:',
@@ -713,7 +722,7 @@ describe('headless recorded-session snapshots', () => {
         { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } },
       ].map(record => JSON.stringify(record)).join('\n')
 
-      expect(stderrFromSession(log)).toBe('dsh: reasoning:\nfirst thought\n')
+      expect(stderrFromSession(log)).toBe('# turn started\ndsh: reasoning:\nfirst thought\n')
     },
   )
 
@@ -736,7 +745,18 @@ describe('headless recorded-session snapshots', () => {
       { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } },
     ].map(record => JSON.stringify(record)).join('\n')
 
-    expect(stderrFromSession(log)).toBe('dsh: reasoning:\nfirst thought\ndsh: reasoning:\nsecond\n')
+    expect(stderrFromSession(log)).toBe('# turn started\ndsh: reasoning:\nfirst thought\ndsh: reasoning:\nsecond\n')
+  })
+
+  it('heartbeats one stderr line per tool call and closes an open reasoning line', () => {
+    const log = [
+      { type: 'turn/start', data: { turn: 1 } },
+      { type: 'reasoning-chunks', data: { texts: ['thinking'] } },
+      { type: 'tool/call', data: { turn: 1, step: 1, callId: 'call-1', name: 'read_file', arguments: '{}' } },
+      { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } },
+    ].map(record => JSON.stringify(record)).join('\n')
+
+    expect(stderrFromSession(log)).toBe('# turn started\ndsh: reasoning:\nthinking\n# tool: read_file\n')
   })
 
   it('writes header sidecars without replacing a retained Session generation', async () => {
